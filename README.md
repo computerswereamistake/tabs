@@ -8,6 +8,12 @@ doing forward-auth (e.g. Caddy + Authelia), which sets `Remote-User`,
 `Remote-Name`, `Remote-Email` and `Remote-Groups`. Those headers are only
 believed when the request comes from an address in `TABS_TRUSTED_PROXIES`.
 
+> **Tabs is not an access-control layer.** Group filtering only decides which
+> tabs appear in the sidebar; a viewer who cannot see a tab can still type its
+> URL. Enforce who may reach each app in the reverse proxy and auth server
+> (e.g. Authelia `access_control` rules per path or host), and treat `groups`
+> here as a convenience that should mirror those rules.
+
 Design goals: small attack surface. Stdlib Go plus one YAML library, no
 database, no writes, no outbound network, distroless image.
 
@@ -21,14 +27,16 @@ in the config file and environment, never in this repo.
 | `TABS_CONFIG` | `/config/tabs.yaml` | Config file path |
 | `TABS_ICONS_DIR` | `/config/icons` | Icon files |
 | `TABS_LISTEN` | `:8080` | Listen address |
-| `TABS_TRUSTED_PROXIES` | (required) | Comma-separated CIDRs/IPs allowed to send identity headers |
+| `TABS_TRUSTED_PROXIES` | (required) | Comma-separated IPs/CIDRs allowed to send identity headers (see [Trusted proxies](#trusted-proxies)) |
 
 See [tabs.example.yaml](tabs.example.yaml). Each tab has:
 
 - `slug`: unique, `^[a-z0-9-]+$`, used as the URL `#hash`
 - `name`: display name
-- `url`: a same-origin path (`/app/`) or an absolute `https://` URL
-- `icon` (optional): file name inside `TABS_ICONS_DIR`
+- `url`: a same-origin path (`/app/`) or an absolute `https://` URL with a
+  plain hostname. It may not point at this app (`/` or `/_tabs/...`).
+- `icon` (optional): file name inside `TABS_ICONS_DIR`, one of `.svg .png
+  .webp .ico .jpg .jpeg .gif`. Only those types are ever served from that dir.
 - `groups` (optional): viewer must be in at least one; empty means any
   authenticated viewer. Matching is exact and case-sensitive.
 
@@ -56,32 +64,88 @@ of any absolute tab URLs.
 
 ## Deploying
 
-Compose example (substitute your own image, network and subnet):
+### Trusted proxies
+
+Every address in `TABS_TRUSTED_PROXIES` can claim to be any user, so the
+range should contain nothing but the reverse proxy:
+
+- **Use a dedicated network.** Put tabs on its own small Docker network that
+  only the proxy also joins, and trust the range its containers are given
+  (see the Compose example). The proxy keeps a dynamic IP. Trusting a shared
+  network's subnet instead trusts every container on it, including the apps
+  you frame. `0.0.0.0/0` and `::/0` are refused.
+- **Never publish the tabs port** (`ports:` in Compose). Docker's userland
+  proxy makes outside clients appear to come from the network's gateway
+  address, so a published port inside a trusted range lets anyone forge
+  identity headers.
+- The proxy must remove client-supplied `Remote-*` headers before forward-auth
+  sets them. A request with any identity header repeated gets 401, in case a
+  proxy appends rather than replaces.
+
+### Compose
+
+Substitute your own image, paths and subnet:
 
 ```yaml
-tabs:
-  container_name: tabs
-  image: ghcr.io/computerswereamistake/tabs:<tag>
-  restart: unless-stopped
-  networks: [front]
-  environment:
-    TABS_TRUSTED_PROXIES: 172.16.0.0/12   # your proxy network's subnet: docker network inspect <network>
-  volumes:
-    - /path/to/tabs-config:/config:ro     # tabs.yaml + icons/
-  read_only: true
-  cap_drop: [ALL]
-  security_opt: ["no-new-privileges:true"]
-  healthcheck:
-    test: ["CMD", "/tabs", "healthcheck"]
+services:
+  tabs:
+    container_name: tabs
+    image: ghcr.io/computerswereamistake/tabs:<tag>
+    restart: unless-stopped
+    networks: [tabs-auth]                 # no `ports:`; only the proxy reaches it
+    environment:
+      TABS_TRUSTED_PROXIES: 10.99.0.8/29  # = tabs-auth ip_range below
+    volumes:
+      - /path/to/tabs-config:/config:ro   # tabs.yaml + icons/
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "/tabs", "healthcheck"]
+
+  caddy:
+    # ...existing config...
+    networks: [front, tabs-auth]          # front for the apps, tabs-auth for tabs
+
+networks:
+  tabs-auth:
+    internal: true                        # no outbound access for tabs
+    ipam:
+      config:
+        - subnet: 10.99.0.0/28
+          gateway: 10.99.0.1              # the Docker host's side of the bridge
+          ip_range: 10.99.0.8/29          # containers get .8-.15, never the gateway
 ```
 
-Reverse proxy notes:
+Containers still get dynamic addresses, but always from `ip_range`, so
+trusting that range trusts only Caddy and tabs. The gateway address belongs to
+the Docker host, and any process on the host connects to the network from it,
+which is why it sits outside the trusted range. Pick a subnet that doesn't
+clash with your other networks.
 
-- Route `/` (and `/_tabs/*`) to `tabs:8080` after `forward_auth`, and make sure
-  the proxy strips client-supplied `Remote-*` headers.
-- Framed apps must not send `X-Frame-Options: DENY` or a restrictive
-  `frame-ancestors`; override those headers in the proxy for that route if
-  needed.
+### Reverse proxy
+
+- Route `/` and `/_tabs/*` to `tabs:8080` after `forward_auth`.
+- Framed apps that send `X-Frame-Options: DENY` or a restrictive
+  `frame-ancestors` will not load. **Replace** those headers rather than
+  removing them, or the app becomes frameable by any site:
+  - same-origin apps: `Content-Security-Policy: frame-ancestors 'self'` (and
+    drop `X-Frame-Options`)
+  - apps on another host: `frame-ancestors https://<tabs host>`
+
+  Caddy example for one route: `header /app/* { -X-Frame-Options
+  Content-Security-Policy "frame-ancestors 'self'" }`. If the app sends its
+  own CSP, merge rather than overwrite.
+
+### Known behaviour
+
+- **Expired sessions show a blank frame.** When the auth session expires
+  while you sit on a tab, the framed app redirects to the login host, which
+  both tabs' CSP and the login page's own headers refuse to frame. Reload the
+  whole page to log in again.
+- Framed same-origin apps share an origin with tabs, so a script-injection
+  bug in one of them can reach the tabs page. Keep the apps patched; serving
+  tabs on its own host is the stronger isolation if you need it.
 
 ## Development
 

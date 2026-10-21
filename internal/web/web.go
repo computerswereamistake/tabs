@@ -6,6 +6,7 @@ package web
 import (
 	"context"
 	"embed"
+	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
@@ -95,6 +96,9 @@ func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
 		if p.Addr().Is4In6() {
 			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("%s would trust every address", f)
+		}
 		out = append(out, p.Masked())
 	}
 	return out, nil
@@ -116,9 +120,18 @@ func (s *Server) isTrusted(remoteAddr string) bool {
 	return false
 }
 
+var identityHeaders = []string{"Remote-User", "Remote-Name", "Remote-Email", "Remote-Groups"}
+
 func (s *Server) viewer(r *http.Request) (tabs.Viewer, bool) {
 	if !s.isTrusted(r.RemoteAddr) {
 		return tabs.Viewer{}, false
+	}
+	// A repeated identity header means a proxy appended instead of replacing,
+	// and the first value may be the client's. Refuse rather than guess.
+	for _, h := range identityHeaders {
+		if len(r.Header.Values(h)) > 1 {
+			return tabs.Viewer{}, false
+		}
 	}
 	v, err := tabs.NewViewer(r.Header.Get("Remote-User"), r.Header.Get("Remote-Name"), r.Header.Get("Remote-Groups"))
 	return v, err == nil
@@ -165,7 +178,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Set("Cache-Control", "no-cache")
 		serveFile(rec, r, s.static, strings.TrimPrefix(p, prefixStatic))
 	case strings.HasPrefix(p, prefixIcons):
-		serveFile(rec, r, s.icons, strings.TrimPrefix(p, prefixIcons))
+		name := strings.TrimPrefix(p, prefixIcons)
+		ct, ok := tabs.IconContentType(name)
+		if !ok {
+			http.NotFound(rec, r)
+			return
+		}
+		h.Set("Content-Type", ct)
+		serveFile(rec, r, s.icons, name)
 	default:
 		http.NotFound(rec, r)
 	}

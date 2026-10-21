@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -115,11 +117,56 @@ func (c Config) Validate() error {
 		if err := checkURL(t.URL); err != nil {
 			return fmt.Errorf("tab %q: url: %w", t.Slug, err)
 		}
-		if strings.Contains(t.Icon, "/") || strings.Contains(t.Icon, `\`) || strings.Contains(t.Icon, "..") {
-			return fmt.Errorf("tab %q: icon %q must be a plain file name", t.Slug, t.Icon)
+		if isOwnPath(t.URL) {
+			return fmt.Errorf("tab %q: url %q points at this app, which cannot be framed", t.Slug, t.URL)
+		}
+		if t.Icon != "" {
+			if strings.Contains(t.Icon, "/") || strings.Contains(t.Icon, `\`) || strings.Contains(t.Icon, "..") {
+				return fmt.Errorf("tab %q: icon %q must be a plain file name", t.Slug, t.Icon)
+			}
+			if _, ok := IconContentType(t.Icon); !ok {
+				return fmt.Errorf("tab %q: icon %q must be one of %s", t.Slug, t.Icon, strings.Join(slices.Sorted(maps.Keys(iconTypes)), " "))
+			}
 		}
 	}
 	return nil
+}
+
+// iconTypes is the allowlist of icon file extensions and their content types.
+// Nothing else is served from the icons dir, so a stray HTML file there can
+// never be served on the app's origin.
+var iconTypes = map[string]string{
+	".svg":  "image/svg+xml",
+	".png":  "image/png",
+	".webp": "image/webp",
+	".ico":  "image/x-icon",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+}
+
+// IconContentType returns the content type for an allowed icon file name.
+func IconContentType(name string) (string, bool) {
+	ct, ok := iconTypes[strings.ToLower(path.Ext(name))]
+	return ct, ok
+}
+
+// hostRE limits absolute-URL hosts to plain hostnames, so nothing unusual
+// (wildcards, commas, semicolons) reaches the CSP frame-src directive.
+var hostRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+
+// isOwnPath reports whether a same-origin URL points at this app's own
+// routes ("/" or "/_tabs/..."), which refuse to be framed.
+func isOwnPath(s string) bool {
+	if !strings.HasPrefix(s, "/") {
+		return false
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	p := path.Clean(u.Path)
+	return p == "/" || p == "/_tabs" || strings.HasPrefix(p, "/_tabs/")
 }
 
 // checkURL accepts a same-origin path ("/x/") or an absolute https URL.
@@ -140,6 +187,9 @@ func checkURL(s string) error {
 	}
 	if u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return fmt.Errorf("%q must be a path starting with / or an absolute https:// URL", s)
+	}
+	if !hostRE.MatchString(u.Hostname()) {
+		return fmt.Errorf("%q: host %q must be a plain hostname", s, u.Hostname())
 	}
 	return nil
 }

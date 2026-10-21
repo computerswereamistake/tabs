@@ -129,6 +129,15 @@ func TestValidate(t *testing.T) {
 		{"icon with dotdot", func(c *Config) { c.Tabs[0].Icon = "..one.svg" }},
 		{"icon with backslash", func(c *Config) { c.Tabs[0].Icon = `a\b.svg` }},
 		{"bad logout url", func(c *Config) { c.LogoutURL = "javascript:alert(1)" }},
+		{"wildcard host", func(c *Config) { c.Tabs[1].URL = "https://*.example.com/" }},
+		{"comma in host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com,evil/" }},
+		{"semicolon in host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com;img-src/" }},
+		{"url is app root", func(c *Config) { c.Tabs[0].URL = "/" }},
+		{"url is app route", func(c *Config) { c.Tabs[0].URL = "/_tabs/healthz" }},
+		{"url is app route, unclean", func(c *Config) { c.Tabs[0].URL = "/x/../_tabs/" }},
+		{"url is app route, encoded", func(c *Config) { c.Tabs[0].URL = "/%5ftabs/static/app.js" }},
+		{"icon not an image", func(c *Config) { c.Tabs[0].Icon = "page.html" }},
+		{"icon without extension", func(c *Config) { c.Tabs[0].Icon = "one" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,6 +145,28 @@ func TestValidate(t *testing.T) {
 			tt.mutate(&c)
 			if err := c.Validate(); err == nil {
 				t.Error("Validate accepted a bad config")
+			}
+		})
+	}
+}
+
+func TestValidateAccepts(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"no icon", func(c *Config) { c.Tabs[0].Icon = "" }},
+		{"uppercase icon extension", func(c *Config) { c.Tabs[0].Icon = "ONE.PNG" }},
+		{"host with port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:8443/x/" }},
+		{"path starting with _tabs-like name", func(c *Config) { c.Tabs[0].URL = "/_tabsish/" }},
+		{"logout on same origin", func(c *Config) { c.LogoutURL = "/logout" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validConfig()
+			tt.mutate(&c)
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate rejected a good config: %v", err)
 			}
 		})
 	}

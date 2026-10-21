@@ -3,8 +3,10 @@
   "use strict";
 
   var tabs = JSON.parse(document.getElementById("tabs-data").textContent) || [];
-  var bySlug = {};
-  tabs.forEach(function (t) { bySlug[t.slug] = t; });
+  // Maps, not plain objects: the hash is user input, and "#constructor" or
+  // "#__proto__" must not match Object.prototype members.
+  var bySlug = new Map();
+  tabs.forEach(function (t) { bySlug.set(t.slug, t); });
 
   var shell = document.getElementById("shell");
   var frames = document.getElementById("frames");
@@ -17,7 +19,7 @@
   var links = document.querySelectorAll(".tab[data-slug]");
   var mobile = window.matchMedia("(max-width: 767px)");
 
-  var iframes = {}; // slug -> iframe, created on first selection
+  var iframes = new Map(); // slug -> iframe, created on first selection
   var active = null;
 
   function setCollapsed(collapsed) {
@@ -28,19 +30,19 @@
   }
 
   function select(slug) {
-    var t = bySlug[slug];
+    var t = bySlug.get(slug);
     if (!t) return false;
-    var frame = iframes[slug];
+    var frame = iframes.get(slug);
     if (!frame) {
       frame = document.createElement("iframe");
       frame.src = t.url;
       frame.title = t.name;
       frame.setAttribute("allow", "fullscreen");
       frame.setAttribute("referrerpolicy", "same-origin");
-      iframes[slug] = frame;
+      iframes.set(slug, frame);
       frames.appendChild(frame);
     }
-    Object.keys(iframes).forEach(function (s) { iframes[s].hidden = s !== slug; });
+    iframes.forEach(function (f, s) { f.hidden = s !== slug; });
     links.forEach(function (a) {
       var on = a.getAttribute("data-slug") === slug;
       a.classList.toggle("active", on);
@@ -67,25 +69,25 @@
   window.addEventListener("hashchange", function () { select(fromHash()); });
 
   reloadBtn.addEventListener("click", function () {
-    var frame = iframes[active];
+    var frame = iframes.get(active);
     if (!frame) return;
     try {
       frame.contentWindow.location.reload();
     } catch (e) {
       // Cross-origin: we cannot reach into the frame, so reset its src.
-      frame.src = bySlug[active].url;
+      frame.src = bySlug.get(active).url;
     }
   });
 
   // Open the frame's current page when we can read it (same-origin).
   popout.addEventListener("click", function () {
-    var frame = iframes[active];
+    var frame = iframes.get(active);
     if (!frame) return;
     try {
       var href = frame.contentWindow.location.href;
       if (href && href !== "about:blank") popout.href = href;
     } catch (e) {
-      popout.href = bySlug[active].url;
+      popout.href = bySlug.get(active).url;
     }
   });
 

@@ -35,6 +35,7 @@ func testServer(t *testing.T) *Server {
 	icons := fstest.MapFS{
 		"alpha.svg":     {Data: []byte("<svg/>")},
 		"sub/inner.svg": {Data: []byte("<svg/>")},
+		"phish.html":    {Data: []byte("<h1>log in</h1>")},
 	}
 	return New(cfg, trusted, icons, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
@@ -74,6 +75,24 @@ func TestIndexAuth(t *testing.T) {
 			}
 			if got := rr.Header().Get("Cache-Control"); got != "no-store" {
 				t.Errorf("Cache-Control = %q", got)
+			}
+		})
+	}
+}
+
+func TestIndexRejectsRepeatedIdentityHeaders(t *testing.T) {
+	s := testServer(t)
+	for _, h := range []string{"Remote-User", "Remote-Name", "Remote-Email", "Remote-Groups"} {
+		t.Run(h, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = trustedAddr
+			req.Header.Set("Remote-User", "bob")
+			req.Header.Add(h, "admins")
+			req.Header.Add(h, "users")
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", rr.Code)
 			}
 		})
 	}
@@ -164,6 +183,7 @@ func TestRoutes(t *testing.T) {
 		{"GET", "/_tabs/icons/..%2ftabs.yaml", http.StatusNotFound},
 		{"GET", "/_tabs/icons/..%5ctabs.yaml", http.StatusNotFound},
 		{"GET", "/_tabs/static/../../web.go", http.StatusNotFound},
+		{"GET", "/_tabs/icons/phish.html", http.StatusNotFound},
 		{"GET", "/other-app/", http.StatusNotFound},
 		{"POST", "/", http.StatusMethodNotAllowed},
 		{"PUT", "/_tabs/healthz", http.StatusMethodNotAllowed},
@@ -187,6 +207,14 @@ func TestStaticContentType(t *testing.T) {
 	}
 }
 
+func TestIconContentType(t *testing.T) {
+	s := testServer(t)
+	rr := do(s, "GET", "/_tabs/icons/alpha.svg", trustedAddr, nil)
+	if ct := rr.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+}
+
 func TestParseTrustedProxies(t *testing.T) {
 	ps, err := ParseTrustedProxies(" 172.16.0.0/12 , ,fd00::/8,127.0.0.1")
 	if err != nil {
@@ -195,7 +223,7 @@ func TestParseTrustedProxies(t *testing.T) {
 	if len(ps) != 3 {
 		t.Fatalf("got %d prefixes", len(ps))
 	}
-	for _, bad := range []string{"nope", "10.0.0.0/33", "1.2.3"} {
+	for _, bad := range []string{"nope", "10.0.0.0/33", "1.2.3", "0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96"} {
 		if _, err := ParseTrustedProxies(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}

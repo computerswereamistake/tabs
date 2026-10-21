@@ -33,6 +33,7 @@ const (
 	prefixStatic = "/_tabs/static/"
 	prefixIcons  = "/_tabs/icons/"
 	pathHealthz  = "/_tabs/healthz"
+	pathSession  = "/_tabs/session"
 )
 
 // state is swapped atomically on config reload.
@@ -69,7 +70,8 @@ func (s *Server) SetConfig(cfg tabs.Config) {
 
 func buildCSP(frameOrigins []string) string {
 	frameSrc := strings.Join(append([]string{"'self'"}, frameOrigins...), " ")
-	return "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+	// connect-src 'self' is only for the page's session check.
+	return "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
 		"frame-src " + frameSrc + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 }
 
@@ -170,6 +172,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch p := r.URL.Path; {
 	case p == "/":
 		s.serveIndex(rec, r, st.cfg)
+	case p == pathSession:
+		s.serveSession(rec, r)
 	case p == pathHealthz:
 		h.Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(rec, "ok")
@@ -225,6 +229,23 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request, cfg tabs.Con
 	if err := indexTmpl.Execute(w, data); err != nil {
 		s.log.Error("render index", "err", err)
 	}
+}
+
+// serveSession answers the page's session check: 204 while forward-auth is
+// still passing identity through, 401 otherwise. In production an expired
+// session never reaches here (the proxy redirects to login first); the page
+// treats that redirect the same as a 401.
+func (s *Server) serveSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	v, ok := s.viewer(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if info, _ := r.Context().Value(reqInfoKey{}).(*reqInfo); info != nil {
+		info.user = v.User
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // serveFile serves a single regular file from fsys. Invalid paths ("..",

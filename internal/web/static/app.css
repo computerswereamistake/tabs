@@ -199,6 +199,19 @@ nav { flex: 1; overflow-y: auto; overflow-x: hidden; }
 
 .mobile-only { display: none; }
 
+.session-banner {
+  padding: 10px 14px;
+  background: #5c3b12;
+  color: #ffe2b8;
+  border-bottom: 1px solid #7a5220;
+}
+.session-banner a { color: #fff; font-weight: 600; }
+
+@media (prefers-color-scheme: light) {
+  .session-banner { background: #fff1d6; color: #5c3b12; border-bottom-color: #f0d199; }
+  .session-banner a { color: #5c3b12; }
+}
+
 .frames { flex: 1; position: relative; min-height: 0; }
 
 .frames iframe {

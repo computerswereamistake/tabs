@@ -98,6 +98,31 @@ func TestIndexRejectsRepeatedIdentityHeaders(t *testing.T) {
 	}
 }
 
+func TestSession(t *testing.T) {
+	s := testServer(t)
+	tests := []struct {
+		name   string
+		remote string
+		hdr    map[string]string
+		want   int
+	}{
+		{"logged in", trustedAddr, map[string]string{"Remote-User": "bob"}, http.StatusNoContent},
+		{"no headers", trustedAddr, nil, http.StatusUnauthorized},
+		{"untrusted", "203.0.113.9:1", map[string]string{"Remote-User": "bob"}, http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := do(s, "GET", "/_tabs/session", tt.remote, tt.hdr)
+			if rr.Code != tt.want {
+				t.Errorf("status = %d, want %d", rr.Code, tt.want)
+			}
+			if rr.Header().Get("Cache-Control") != "no-store" {
+				t.Error("session check must not be cached")
+			}
+		})
+	}
+}
+
 func TestIndexFiltersTabs(t *testing.T) {
 	s := testServer(t)
 	rr := do(s, "GET", "/", trustedAddr, map[string]string{"Remote-User": "bob", "Remote-Groups": "users, other"})
@@ -144,7 +169,7 @@ func TestIndexEscapesName(t *testing.T) {
 
 func TestSecurityHeaders(t *testing.T) {
 	s := testServer(t)
-	wantCSP := "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+	wantCSP := "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
 		"frame-src 'self' https://beta.example.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	for _, path := range []string{"/", "/_tabs/healthz", "/_tabs/static/app.css", "/nope"} {
 		t.Run(path, func(t *testing.T) {

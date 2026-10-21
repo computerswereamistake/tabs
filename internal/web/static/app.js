@@ -39,6 +39,10 @@
       frame.title = t.name;
       frame.setAttribute("allow", "fullscreen");
       frame.setAttribute("referrerpolicy", "same-origin");
+      // A navigation inside the app is a good moment to check the session:
+      // if it expired, that navigation was just sent to the login page,
+      // which refuses to be framed.
+      frame.addEventListener("load", function () { checkSession(false); });
       iframes.set(slug, frame);
       frames.appendChild(frame);
     }
@@ -66,7 +70,70 @@
     }
   }
 
-  window.addEventListener("hashchange", function () { select(fromHash()); });
+  window.addEventListener("hashchange", function () {
+    if (select(fromHash())) checkSession(false);
+  });
+
+  // Session watch. Framed apps can't show the login page (it refuses to be
+  // framed), so an expired session would otherwise leave a blank frame. We
+  // check at natural moments rather than on a timer: a timer would keep the
+  // auth session alive forever and defeat its inactivity timeout.
+  var RETURN_KEY = "tabs:return";     // tab to reopen after logging in
+  var RELOADED_KEY = "tabs:reloaded"; // set when we reload for login
+  var banner = document.getElementById("session-banner");
+  var lastCheck = 0;
+  var checking = false;
+
+  // sessionStorage can throw (privacy modes); it's only a convenience.
+  function store(k, v) {
+    try {
+      if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v);
+    } catch (e) { /* ignore */ }
+  }
+  function load(k) {
+    try { return sessionStorage.getItem(k); } catch (e) { return null; }
+  }
+
+  function sessionExpired() {
+    if (active) store(RETURN_KEY, active);
+    // If we already reloaded for login and the check still fails, the page
+    // itself loaded fine, so something else is wrong (e.g. the check route
+    // isn't behind forward-auth). Show a banner instead of looping.
+    if (load(RELOADED_KEY)) {
+      banner.hidden = false;
+      return;
+    }
+    store(RELOADED_KEY, "1");
+    location.reload();
+  }
+
+  function checkSession(force) {
+    var now = Date.now();
+    if (checking || (!force && now - lastCheck < 15000)) return;
+    checking = true;
+    lastCheck = now;
+    fetch("/_tabs/session", { credentials: "same-origin", redirect: "manual", cache: "no-store" })
+      .then(function (r) {
+        if (r.ok) {
+          store(RELOADED_KEY, null);
+          banner.hidden = true;
+        } else if (r.type === "opaqueredirect" || r.status === 401 || r.status === 403) {
+          sessionExpired();
+        }
+        // Anything else (5xx, 404) says nothing about the session.
+      })
+      .catch(function () { /* offline: say nothing */ })
+      .then(function () { checking = false; });
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") checkSession(false);
+  });
+  window.addEventListener("focus", function () { checkSession(false); });
+  document.getElementById("session-login").addEventListener("click", function () {
+    if (active) store(RETURN_KEY, active);
+    store(RELOADED_KEY, null);
+  });
 
   reloadBtn.addEventListener("click", function () {
     var frame = iframes.get(active);
@@ -115,8 +182,16 @@
 
   setCollapsed(mobile.matches);
 
-  if (tabs.length > 0 && !select(fromHash())) {
-    history.replaceState(null, "", "#" + tabs[0].slug);
-    select(tabs[0].slug);
+  // The login redirect drops the #hash, so fall back to the tab we stored
+  // before sending the page through login.
+  var returnTo = load(RETURN_KEY);
+  store(RETURN_KEY, null);
+  var initial = [fromHash(), returnTo, tabs.length ? tabs[0].slug : ""].find(function (s) {
+    return bySlug.has(s);
+  });
+  if (initial) {
+    if (fromHash() !== initial) history.replaceState(null, "", "#" + initial);
+    select(initial);
   }
+  checkSession(true);
 })();

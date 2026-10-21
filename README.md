@@ -56,6 +56,7 @@ docker kill --signal=HUP tabs
 | `GET /` | The page; 401 without a trusted `Remote-User` |
 | `GET /_tabs/static/*` | Embedded CSS/JS |
 | `GET /_tabs/icons/*` | Icons from `TABS_ICONS_DIR`; no listings |
+| `GET /_tabs/session` | `204` while forward-auth identifies the viewer, else 401; the page's session check |
 | `GET /_tabs/healthz` | `200 ok`, no auth |
 | anything else | 404; methods other than GET/HEAD get 405 |
 
@@ -125,7 +126,9 @@ clash with your other networks.
 
 ### Reverse proxy
 
-- Route `/` and `/_tabs/*` to `tabs:8080` after `forward_auth`.
+- Route `/` and `/_tabs/*` to `tabs:8080` after `forward_auth`. In
+  particular `/_tabs/session` must go through `forward_auth`, or the page
+  will think the session has expired and show a "Log in again" banner.
 - Framed apps that send `X-Frame-Options: DENY` or a restrictive
   `frame-ancestors` will not load. **Replace** those headers rather than
   removing them, or the app becomes frameable by any site:
@@ -139,10 +142,14 @@ clash with your other networks.
 
 ### Known behaviour
 
-- **Expired sessions show a blank frame.** When the auth session expires
-  while you sit on a tab, the framed app redirects to the login host, which
-  both tabs' CSP and the login page's own headers refuse to frame. Reload the
-  whole page to log in again.
+- **Expired sessions.** A framed app can't show the login page (it refuses
+  to be framed), so the page checks `/_tabs/session` when you return to the
+  browser tab, switch tabs, or an app navigates inside its frame (at most
+  every 15 seconds). If the session has expired it reloads, so the proxy
+  sends you to login, and afterwards reopens the tab you were on. There is
+  deliberately no timer: polling would keep the auth session alive and defeat
+  its inactivity timeout. A single-page app that never navigates its frame
+  can still sit on a failed request until one of those moments.
 - Framed same-origin apps share an origin with tabs, so a script-injection
   bug in one of them can reach the tabs page. Keep the apps patched; serving
   tabs on its own host is the stronger isolation if you need it.

@@ -1,0 +1,7 @@
+.git
+.claude
+*.md
+Dockerfile
+.dockerignore
+tabs.yaml
+config/

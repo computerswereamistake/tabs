@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>{{.Title}}</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/_tabs/static/app.css">
+<script src="/_tabs/static/app.js" defer></script>
+</head>
+<body>
+<div class="shell" id="shell">
+  <aside class="sidebar" id="sidebar" aria-label="Apps">
+    <div class="brand">
+      <button type="button" class="icon-btn" id="toggle" aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <span class="brand-title">{{.Title}}</span>
+    </div>
+    <nav>
+      <ul class="tab-list">
+        {{- range .Tabs}}
+        <li>
+          <a class="tab" href="#{{.Slug}}" data-slug="{{.Slug}}" title="{{.Name}}">
+            {{- if .Icon}}
+            <img class="tab-icon" src="/_tabs/icons/{{.Icon}}" alt="" width="24" height="24">
+            {{- else}}
+            <span class="tab-icon tab-icon-letter" aria-hidden="true">{{.Initial}}</span>
+            {{- end}}
+            <span class="tab-name">{{.Name}}</span>
+          </a>
+        </li>
+        {{- end}}
+      </ul>
+    </nav>
+    <footer class="viewer">
+      <span class="viewer-name" title="{{.Viewer.User}}">{{.Viewer.Name}}</span>
+      {{- if .LogoutURL}}
+      <a class="logout" href="{{.LogoutURL}}">Log out</a>
+      {{- end}}
+    </footer>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
+  <main class="main">
+    <header class="topbar">
+      <button type="button" class="icon-btn mobile-only" id="toggle-mobile" aria-label="Open sidebar" aria-controls="sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <span class="active-name" id="active-name"></span>
+      <span class="spacer"></span>
+      <button type="button" class="icon-btn" id="reload" aria-label="Reload app" title="Reload" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+      </button>
+      <a class="icon-btn" id="popout" href="#" target="_blank" rel="noopener noreferrer" aria-label="Open app in new tab" title="Open in new tab" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+      </a>
+    </header>
+    <div class="session-banner" id="session-banner" role="alert" hidden>
+      Your login has expired. <a href="/" id="session-login">Log in again</a>
+    </div>
+    <div class="frames" id="frames">
+      {{- if not .Tabs}}
+      <p class="empty">No apps are available to your account.</p>
+      {{- end}}
+    </div>
+  </main>
+</div>
+<script type="application/json" id="tabs-data">{{.Tabs}}</script>
+</body>
+</html>

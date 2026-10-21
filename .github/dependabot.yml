@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Pinned action SHAs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The one Go dependency (YAML).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Pinned base-image digests in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

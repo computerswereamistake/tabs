@@ -1,0 +1,4 @@
+# Real deployment config holds site URLs; keep it out of the repo.
+/tabs.yaml
+/config/
+/tabs

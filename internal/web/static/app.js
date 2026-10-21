@@ -9,6 +9,7 @@
   tabs.forEach(function (t) { bySlug.set(t.slug, t); });
 
   var shell = document.getElementById("shell");
+  var sidebar = document.getElementById("sidebar");
   var frames = document.getElementById("frames");
   var activeName = document.getElementById("active-name");
   var reloadBtn = document.getElementById("reload");
@@ -23,6 +24,12 @@
   var active = null;
 
   function setCollapsed(collapsed) {
+    // On phones the collapsed drawer is offscreen, so take it out of the
+    // focus order, first moving focus off it to the control that reopens it.
+    // The desktop icons-only sidebar stays interactive.
+    var hide = collapsed && mobile.matches;
+    if (hide && sidebar.contains(document.activeElement)) toggleMobile.focus();
+    sidebar.inert = hide;
     shell.classList.toggle("collapsed", collapsed);
     toggle.setAttribute("aria-expanded", String(!collapsed));
     toggleMobile.setAttribute("aria-expanded", String(!collapsed));
@@ -98,10 +105,14 @@
       return false;
     }
   })();
+  // store reports whether the write succeeded (setItem throws when full).
   function store(k, v) {
     try {
       if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v);
-    } catch (e) { /* ignore */ }
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
   function load(k) {
     try { return sessionStorage.getItem(k); } catch (e) { return null; }
@@ -111,12 +122,12 @@
     if (active) store(RETURN_KEY, active);
     // If we already reloaded for login and the check still fails, the page
     // itself loaded fine, so something else is wrong (e.g. the check route
-    // isn't behind forward-auth). Show a banner instead of looping.
-    if (!storageOK || load(RELOADED_KEY)) {
+    // isn't behind forward-auth). Show a banner instead of looping. Reload
+    // only once the marker is saved, or the guard would not survive it.
+    if (!storageOK || load(RELOADED_KEY) || !store(RELOADED_KEY, "1")) {
       banner.hidden = false;
       return;
     }
-    store(RELOADED_KEY, "1");
     location.reload();
   }
 

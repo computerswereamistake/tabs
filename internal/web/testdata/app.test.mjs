@@ -12,6 +12,8 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../static/app.js", import.meta.url), "utf8");
 
+let currentDocument = null; // the fake document of the latest boot, for focus()
+
 class El {
   constructor(tag, attrs = {}) {
     this.tagName = tag;
@@ -34,6 +36,8 @@ class El {
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   dispatch(type, ev = {}) { (this.listeners[type] || []).forEach((fn) => fn(ev)); }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  contains(el) { for (; el; el = el.parentNode) if (el === this) return true; return false; }
+  focus() { currentDocument.activeElement = this; }
 }
 
 const TABS = [
@@ -45,22 +49,25 @@ const TABS = [
 // boot runs app.js in a fresh fake browser and returns handles for tests.
 // responses: what successive fetches of /_tabs/session return; each entry is
 // a status number, "redirect", or "reject". The last entry repeats.
-function boot({ hash = "", storage = {}, storageBroken = false, responses = [204] } = {}) {
+// quota: characters (keys plus values) sessionStorage can hold; writes past it throw.
+// mobile: whether the phone-width media query matches.
+function boot({ hash = "", storage = {}, storageBroken = false, quota = Infinity, responses = [204], mobile = false } = {}) {
   const clock = { now: 0 };
   const byId = {};
   const add = (id, el = new El("div")) => (byId[id] = el);
   add("tabs-data").textContent = JSON.stringify(TABS);
-  ["shell", "frames", "active-name", "reload", "popout", "toggle", "toggle-mobile", "scrim", "session-login"].forEach((id) => add(id));
+  ["shell", "sidebar", "frames", "active-name", "reload", "popout", "toggle", "toggle-mobile", "scrim", "session-login"].forEach((id) => add(id));
   add("session-banner").hidden = true;
   const brand = new El("span");
   brand.textContent = "Media";
-  const links = TABS.map((t) => new El("a", { "data-slug": t.slug }));
+  const links = TABS.map((t) => byId.sidebar.appendChild(new El("a", { "data-slug": t.slug })));
 
   const created = [];
   const docListeners = {};
   const document = {
     title: "",
     visibilityState: "visible",
+    activeElement: null,
     getElementById: (id) => byId[id] || null,
     querySelector: (sel) => (sel === ".brand-title" ? brand : null),
     querySelectorAll: (sel) => (sel === ".tab[data-slug]" ? links : []),
@@ -72,11 +79,18 @@ function boot({ hash = "", storage = {}, storageBroken = false, responses = [204
     },
     addEventListener: (type, fn) => (docListeners[type] ||= []).push(fn),
   };
+  currentDocument = document;
 
   const store = new Map(Object.entries(storage));
+  const used = () => [...store].reduce((n, [k, v]) => n + k.length + v.length, 0);
   const sessionStorage = {
     getItem: (k) => { if (storageBroken) throw new Error("denied"); return store.has(k) ? store.get(k) : null; },
-    setItem: (k, v) => { if (storageBroken) throw new Error("denied"); store.set(k, String(v)); },
+    setItem: (k, v) => {
+      if (storageBroken) throw new Error("denied");
+      const prev = store.has(k) ? k.length + store.get(k).length : 0;
+      if (used() - prev + k.length + String(v).length > quota) throw new Error("QuotaExceededError");
+      store.set(k, String(v));
+    },
     removeItem: (k) => { if (storageBroken) throw new Error("denied"); store.delete(k); },
   };
 
@@ -99,7 +113,7 @@ function boot({ hash = "", storage = {}, storageBroken = false, responses = [204
     history: { replaceState: (_s, _t, url) => { location.hash = url; } },
     sessionStorage,
     fetch,
-    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    matchMedia: () => ({ matches: mobile, addEventListener() {} }),
     addEventListener: (type, fn) => (winListeners[type] ||= []).push(fn),
     // The confirm delay runs at once; tests control time via clock instead.
     setTimeout: (fn) => { Promise.resolve().then(fn); return 0; },
@@ -110,8 +124,11 @@ function boot({ hash = "", storage = {}, storageBroken = false, responses = [204
 
   const fire = (listeners, type, ev = {}) => (listeners[type] || []).forEach((fn) => fn(ev));
   return {
-    clock, store, fetches, created, links,
+    clock, store, fetches, created, links, document,
     banner: byId["session-banner"],
+    sidebar: byId.sidebar,
+    toggleMobile: byId["toggle-mobile"],
+    clickToggleMobile: () => byId["toggle-mobile"].dispatch("click"),
     reloads: () => reloads,
     hash: () => location.hash,
     active: () => links.find((a) => a.classList.contains("active"))?.getAttribute("data-slug"),
@@ -224,6 +241,15 @@ test("without storage it never auto-reloads, only shows the banner", async () =>
   assert.equal(b.active(), "alpha");
 });
 
+test("a reload marker that can't be saved shows the banner instead of reloading", async () => {
+  // Room for the startup probe ("tabs:probe" + "1") but not the marker.
+  const b = boot({ hash: "#gamma", quota: 12, responses: [401] });
+  await settle();
+  assert.equal(b.reloads(), 0);
+  assert.equal(b.banner.hidden, false);
+  assert.equal(b.store.has("tabs:reloaded"), false);
+});
+
 test("checks are throttled to one per 15 seconds", async () => {
   const b = boot({ hash: "#alpha" });
   await settle();
@@ -298,4 +324,25 @@ test("the banner's login link remembers the tab and clears the loop marker", asy
   b.clickLogin();
   assert.equal(b.store.get("tabs:return"), "beta");
   assert.equal(b.store.has("tabs:reloaded"), false);
+});
+
+test("desktop sidebar stays interactive when collapsed", () => {
+  const b = boot();
+  assert.equal(b.sidebar.inert, false);
+});
+
+test("closed mobile drawer is inert; open drawer is not", () => {
+  const b = boot({ mobile: true });
+  assert.equal(b.sidebar.inert, true);
+  b.clickToggleMobile();
+  assert.equal(b.sidebar.inert, false);
+});
+
+test("choosing an app on mobile closes the drawer and moves focus out of it", () => {
+  const b = boot({ hash: "#alpha", mobile: true });
+  b.clickToggleMobile();
+  b.links[1].focus();
+  b.navigate("#beta");
+  assert.equal(b.sidebar.inert, true);
+  assert.equal(b.document.activeElement, b.toggleMobile);
 });

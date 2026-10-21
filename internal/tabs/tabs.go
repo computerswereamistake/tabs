@@ -233,7 +233,7 @@ func Parse(r io.Reader) (Config, error) {
 
 // Load reads and parses the config file at path.
 func Load(path string) (Config, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path is the operator's TABS_CONFIG, not request input
 	if err != nil {
 		return Config{}, err
 	}

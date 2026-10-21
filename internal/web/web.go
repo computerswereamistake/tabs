@@ -179,7 +179,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveSession(rec, r)
 	case p == pathHealthz:
 		h.Set("Content-Type", "text/plain; charset=utf-8")
-		io.WriteString(rec, "ok")
+		_, _ = io.WriteString(rec, "ok")
 	case strings.HasPrefix(p, prefixStatic):
 		// Embedded files have no mtime, so make browsers refetch after upgrades.
 		h.Set("Cache-Control", "no-cache")

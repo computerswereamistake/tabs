@@ -190,15 +190,26 @@ node --test internal/web/testdata/app.test.mjs
 
 [GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, pull
 requests and `v*` tags: gofmt, `go mod tidy`, `go vet`, `go test -race`
-(including the JS tests) and govulncheck, then builds the image for
-`linux/amd64` and `linux/arm64`. Only a version tag pushes the image:
+(including the JS tests), govulncheck and gosec, then builds the image for
+`linux/amd64` and `linux/arm64`. Only releases push the image.
 
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
+Releases are automatic. On each push to `main`, CI derives the next version
+from the [Conventional Commit](https://www.conventionalcommits.org/) messages
+since the last `vX.Y.Z` tag, publishes the image, then pushes the tag:
 
-That publishes `ghcr.io/computerswereamistake/tabs:0.1.0` (plus `0.1` and a
-`sha-…` tag). New GHCR packages start private; make it public, or give the
+| Commit message                                | Bump  |
+| --------------------------------------------- | ----- |
+| `feat!: …`, any `type!:`, `BREAKING CHANGE:`  | major |
+| `feat: …`                                     | minor |
+| `fix: …`, `perf: …`                           | patch |
+| anything else (`chore`, `ci`, `docs`, …)      | none  |
+
+The first release, with no tag yet, is `v0.1.0`. With squash merges, the PR
+title is the commit message that counts. A hand-pushed `v*` tag still
+publishes too.
+
+A release publishes `ghcr.io/computerswereamistake/tabs:0.1.0` (plus `0.1` and
+a `sha-…` tag). New GHCR packages start private; make it public, or give the
 deploy host a read token, in the package settings. Actions are pinned to
 commit SHAs and base images to digests; Dependabot proposes updates weekly.
 

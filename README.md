@@ -183,7 +183,7 @@ built-in test runner (no npm packages). Without Node installed they are
 skipped locally; in CI a missing Node fails the build. To run them alone:
 
 ```bash
-node --test internal/web/testdata/
+node --test internal/web/testdata/app.test.mjs
 ```
 
 ## CI and releases

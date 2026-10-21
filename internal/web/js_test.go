@@ -18,7 +18,7 @@ func TestJS(t *testing.T) {
 		}
 		t.Skip("node not installed; skipping JS tests")
 	}
-	cmd := exec.Command(node, "--test", "testdata/")
+	cmd := exec.Command(node, "--test", "testdata/app.test.mjs")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("JS tests failed: %v\n%s", err, out)

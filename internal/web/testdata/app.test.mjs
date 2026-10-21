@@ -1,6 +1,6 @@
 // Tests for static/app.js, run with Node's built-in runner (no dependencies):
 //
-//	node --test internal/web/testdata/
+//	node --test internal/web/testdata/app.test.mjs
 //
 // app.js runs in a vm context against a minimal fake DOM that models only
 // what the script touches. This file lives outside static/ so it is never

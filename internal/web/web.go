@@ -152,6 +152,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Security-Policy", st.csp)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "same-origin")
+	// Other sites can't embed or probe anything here (e.g. /_tabs/session
+	// as a logged-in oracle), whatever the auth cookie's SameSite setting.
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
 
 	defer func() {
 		s.log.Info("request",

@@ -171,7 +171,7 @@ func TestSecurityHeaders(t *testing.T) {
 	s := testServer(t)
 	wantCSP := "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
 		"frame-src 'self' https://beta.example.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-	for _, path := range []string{"/", "/_tabs/healthz", "/_tabs/static/app.css", "/nope"} {
+	for _, path := range []string{"/", "/_tabs/session", "/_tabs/healthz", "/_tabs/static/app.css", "/nope"} {
 		t.Run(path, func(t *testing.T) {
 			rr := do(s, "GET", path, trustedAddr, map[string]string{"Remote-User": "bob"})
 			h := rr.Header()
@@ -183,6 +183,9 @@ func TestSecurityHeaders(t *testing.T) {
 			}
 			if h.Get("Referrer-Policy") != "same-origin" {
 				t.Error("missing Referrer-Policy")
+			}
+			if h.Get("Cross-Origin-Resource-Policy") != "same-origin" {
+				t.Error("missing Cross-Origin-Resource-Policy")
 			}
 		})
 	}

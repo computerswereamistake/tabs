@@ -42,7 +42,10 @@
       // A navigation inside the app is a good moment to check the session:
       // if it expired, that navigation was just sent to the login page,
       // which refuses to be framed.
-      frame.addEventListener("load", function () { checkSession(false); });
+      frame.addEventListener("load", function () {
+        checkSession(false);
+        watchFrame(frame);
+      });
       iframes.set(slug, frame);
       frames.appendChild(frame);
     }
@@ -84,7 +87,17 @@
   var lastCheck = 0;
   var checking = false;
 
-  // sessionStorage can throw (privacy modes); it's only a convenience.
+  // sessionStorage can throw (privacy modes). The loop guard below depends on
+  // it, so without it we never auto-reload and only show the banner.
+  var storageOK = (function () {
+    try {
+      sessionStorage.setItem("tabs:probe", "1");
+      sessionStorage.removeItem("tabs:probe");
+      return true;
+    } catch (e) {
+      return false;
+    }
+  })();
   function store(k, v) {
     try {
       if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v);
@@ -99,7 +112,7 @@
     // If we already reloaded for login and the check still fails, the page
     // itself loaded fine, so something else is wrong (e.g. the check route
     // isn't behind forward-auth). Show a banner instead of looping.
-    if (load(RELOADED_KEY)) {
+    if (!storageOK || load(RELOADED_KEY)) {
       banner.hidden = false;
       return;
     }
@@ -107,29 +120,61 @@
     location.reload();
   }
 
+  // probe resolves to "ok", "expired" or "unknown". Only a redirect (to
+  // login) or 401 means expired; 403 means logged in but not allowed, and
+  // 5xx, 404 or being offline say nothing about the session.
+  function probe() {
+    return fetch("/_tabs/session", { credentials: "same-origin", redirect: "manual", cache: "no-store" })
+      .then(function (r) {
+        if (r.ok) return "ok";
+        if (r.type === "opaqueredirect" || r.status === 401) return "expired";
+        return "unknown";
+      }, function () { return "unknown"; });
+  }
+
   function checkSession(force) {
     var now = Date.now();
     if (checking || (!force && now - lastCheck < 15000)) return;
     checking = true;
     lastCheck = now;
-    fetch("/_tabs/session", { credentials: "same-origin", redirect: "manual", cache: "no-store" })
-      .then(function (r) {
-        if (r.ok) {
+    probe()
+      .then(function (res) {
+        if (res !== "expired") return res;
+        // Reloading throws away every app's state, so confirm first rather
+        // than act on one stray response.
+        return new Promise(function (resolve) { setTimeout(resolve, 1000); }).then(probe);
+      })
+      .then(function (res) {
+        if (res === "ok") {
           store(RELOADED_KEY, null);
           banner.hidden = true;
-        } else if (r.type === "opaqueredirect" || r.status === 401 || r.status === 403) {
+        } else if (res === "expired") {
           sessionExpired();
         }
-        // Anything else (5xx, 404) says nothing about the session.
       })
-      .catch(function () { /* offline: say nothing */ })
       .then(function () { checking = false; });
+  }
+
+  // Clicks and keys inside a frame never reach this page, so for same-origin
+  // apps listen inside the frame too. Each load is a new document, so this
+  // runs again after every navigation. Cross-origin frames give no document.
+  function watchFrame(frame) {
+    var doc = null;
+    try { doc = frame.contentDocument; } catch (e) { /* cross-origin */ }
+    if (!doc) return;
+    ["pointerdown", "keydown"].forEach(function (type) {
+      doc.addEventListener(type, function () { checkSession(false); }, { capture: true, passive: true });
+    });
   }
 
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible") checkSession(false);
   });
   window.addEventListener("focus", function () { checkSession(false); });
+  // Restored from the back/forward cache: no request was made, so check now.
+  window.addEventListener("pageshow", function (e) {
+    if (e.persisted) checkSession(true);
+  });
   document.getElementById("session-login").addEventListener("click", function () {
     if (active) store(RETURN_KEY, active);
     store(RELOADED_KEY, null);

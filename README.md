@@ -127,8 +127,10 @@ clash with your other networks.
 ### Reverse proxy
 
 - Route `/` and `/_tabs/*` to `tabs:8080` after `forward_auth`. In
-  particular `/_tabs/session` must go through `forward_auth`, or the page
-  will think the session has expired and show a "Log in again" banner.
+  particular `/_tabs/session` must go through `forward_auth` under the same
+  Authelia rule as `/` (same policy, e.g. not two-factor for one and
+  one-factor for the other), or the page will think the session has expired
+  and show a "Log in again" banner.
 - Framed apps that send `X-Frame-Options: DENY` or a restrictive
   `frame-ancestors` will not load. **Replace** those headers rather than
   removing them, or the app becomes frameable by any site:
@@ -144,15 +146,30 @@ clash with your other networks.
 
 - **Expired sessions.** A framed app can't show the login page (it refuses
   to be framed), so the page checks `/_tabs/session` when you return to the
-  browser tab, switch tabs, or an app navigates inside its frame (at most
-  every 15 seconds). If the session has expired it reloads, so the proxy
-  sends you to login, and afterwards reopens the tab you were on. There is
-  deliberately no timer: polling would keep the auth session alive and defeat
-  its inactivity timeout. A single-page app that never navigates its frame
-  can still sit on a failed request until one of those moments.
+  browser tab, switch tabs, click or type inside a same-origin app, or an
+  app navigates inside its frame (at most every 15 seconds). If two checks a
+  second apart both say the session has expired, it reloads, so the proxy
+  sends you to login, and afterwards reopens the tab you were on. If the
+  browser blocks storage, or the check still fails straight after such a
+  reload, it shows a "Log in again" banner instead of reloading. For apps on
+  another host, only the tab-level moments apply.
+- **Authelia's inactivity timeout won't fire while tabs is open.** Apps such
+  as Sonarr poll their APIs every few seconds, even in hidden frames, and
+  every poll through `forward_auth` counts as activity. The session then
+  lasts until Authelia's absolute `expiration`, so set that to something
+  you're comfortable with for an unattended, unlocked machine. Tabs itself
+  never polls, so it adds nothing to this.
 - Framed same-origin apps share an origin with tabs, so a script-injection
   bug in one of them can reach the tabs page. Keep the apps patched; serving
   tabs on its own host is the stronger isolation if you need it.
+
+### Operations
+
+- The icons dir is opened once at startup. Editing or adding files in it
+  takes effect immediately; replacing the directory itself needs a restart
+  (`SIGHUP` only re-reads the YAML).
+- The container runs as the distroless `nonroot` user (uid 65532), so the
+  mounted config and icons must be readable by it.
 
 ## Development
 

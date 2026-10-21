@@ -1,0 +1,25 @@
+# Example config. Copy to /config/tabs.yaml (or set TABS_CONFIG) and edit.
+title: Media
+logoutURL: https://auth.example.com/logout
+tabs:
+  # Same-origin app served under a subpath of the host this app runs on.
+  - slug: app-one
+    name: App One
+    url: /app-one/
+    icon: app-one.svg
+    groups: [users]
+  - slug: app-two
+    name: App Two
+    url: /app-two/
+    icon: app-two.svg
+    groups: [users, admins]
+  # App on another origin; its origin is added to the CSP frame-src.
+  - slug: other
+    name: Other App
+    url: https://other.example.com/
+    icon: other.svg
+    groups: [admins]
+  # No groups: visible to every authenticated viewer. No icon: shows an initial.
+  - slug: docs
+    name: Docs
+    url: /docs/

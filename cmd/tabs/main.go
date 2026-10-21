@@ -23,21 +23,30 @@ import (
 	"github.com/computerswereamistake/tabs/internal/web"
 )
 
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+// deps is what run needs from the outside world, so tests can supply their
+// own environment, signals and observation hooks.
+type deps struct {
+	getenv   func(string) string
+	sigs     <-chan os.Signal
+	log      *slog.Logger
+	onListen func(net.Addr) // optional: called once listening
+	onReload func(error)    // optional: called after each SIGHUP
+}
+
+func (d deps) env(key, def string) string {
+	if v := d.getenv(key); v != "" {
 		return v
 	}
 	return def
 }
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	listen := env("TABS_LISTEN", ":8080")
+	d := deps{getenv: os.Getenv, log: slog.New(slog.NewJSONHandler(os.Stderr, nil))}
 
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "healthcheck":
-			if err := healthcheck(listen); err != nil {
+			if err := healthcheck(d.env("TABS_LISTEN", ":8080")); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -48,17 +57,23 @@ func main() {
 		}
 	}
 
-	if err := run(log, listen); err != nil {
-		log.Error("fatal", "err", err)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	d.sigs = sigs
+
+	if err := run(d); err != nil {
+		d.log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, listen string) error {
-	cfgPath := env("TABS_CONFIG", "/config/tabs.yaml")
-	iconsDir := env("TABS_ICONS_DIR", "/config/icons")
+func run(d deps) error {
+	log := d.log
+	listen := d.env("TABS_LISTEN", ":8080")
+	cfgPath := d.env("TABS_CONFIG", "/config/tabs.yaml")
+	iconsDir := d.env("TABS_ICONS_DIR", "/config/icons")
 
-	proxies := os.Getenv("TABS_TRUSTED_PROXIES")
+	proxies := d.getenv("TABS_TRUSTED_PROXIES")
 	if proxies == "" {
 		return errors.New("TABS_TRUSTED_PROXIES is required")
 	}
@@ -84,7 +99,6 @@ func run(log *slog.Logger, listen string) error {
 
 	app := web.New(cfg, trusted, root.FS(), log)
 	srv := &http.Server{
-		Addr:              listen,
 		Handler:           app,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -94,28 +108,34 @@ func run(log *slog.Logger, listen string) error {
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	log.Info("listening", "addr", ln.Addr().String(), "tabs", len(cfg.Tabs))
+	if d.onListen != nil {
+		d.onListen(ln.Addr())
+	}
 
 	errc := make(chan error, 1)
-	go func() {
-		log.Info("listening", "addr", listen, "tabs", len(cfg.Tabs))
-		errc <- srv.ListenAndServe()
-	}()
+	go func() { errc <- srv.Serve(ln) }()
 
 	for {
 		select {
 		case err := <-errc:
 			return err
-		case sig := <-sigs:
+		case sig := <-d.sigs:
 			if sig == syscall.SIGHUP {
 				next, err := tabs.Load(cfgPath)
 				if err != nil {
 					log.Error("reload failed; keeping previous config", "err", err)
-					continue
+				} else {
+					app.SetConfig(next)
+					log.Info("config reloaded", "tabs", len(next.Tabs))
 				}
-				app.SetConfig(next)
-				log.Info("config reloaded", "tabs", len(next.Tabs))
+				if d.onReload != nil {
+					d.onReload(err)
+				}
 				continue
 			}
 			log.Info("shutting down", "signal", sig.String())

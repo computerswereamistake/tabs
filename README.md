@@ -177,6 +177,31 @@ clash with your other networks.
 go test ./... && go vet ./...
 ```
 
+`go test` also runs the browser-script tests in
+[internal/web/testdata](internal/web/testdata/app.test.mjs) through Node's
+built-in test runner (no npm packages). Without Node installed they are
+skipped locally; in CI a missing Node fails the build. To run them alone:
+
+```bash
+node --test internal/web/testdata/
+```
+
+## CI and releases
+
+[GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, pull
+requests and `v*` tags: gofmt, `go mod tidy`, `go vet`, `go test -race`
+(including the JS tests) and govulncheck, then builds the image for
+`linux/amd64` and `linux/arm64`. Only a version tag pushes the image:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+That publishes `ghcr.io/computerswereamistake/tabs:0.1.0` (plus `0.1` and a
+`sha-…` tag). New GHCR packages start private; make it public, or give the
+deploy host a read token, in the package settings. Actions are pinned to
+commit SHAs and base images to digests; Dependabot proposes updates weekly.
+
 ```bash
 TABS_CONFIG=tabs.example.yaml TABS_ICONS_DIR=. TABS_TRUSTED_PROXIES=127.0.0.1 TABS_LISTEN=127.0.0.1:8080 go run ./cmd/tabs
 ```

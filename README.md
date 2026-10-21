@@ -153,8 +153,8 @@ clash with your other networks.
   browser blocks storage, or the check still fails straight after such a
   reload, it shows a "Log in again" banner instead of reloading. For apps on
   another host, only the tab-level moments apply.
-- **Authelia's inactivity timeout won't fire while tabs is open.** Apps such
-  as Sonarr poll their APIs every few seconds, even in hidden frames, and
+- **Authelia's inactivity timeout won't fire while tabs is open.** Many
+  dashboard-style apps poll their APIs every few seconds, even in hidden frames, and
   every poll through `forward_auth` counts as activity. The session then
   lasts until Authelia's absolute `expiration`, so set that to something
   you're comfortable with for an unattended, unlocked machine. Tabs itself

@@ -1,0 +1,11 @@
+{{define "content"}}
+<p>Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+<form method="post" action="/_tabs/login/totp" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="next" value="{{.Data.Next}}">
+  <label>Code
+    <input name="code" autocomplete="one-time-code" inputmode="text" autocapitalize="characters" spellcheck="false" required maxlength="32" autofocus>
+  </label>
+  <button type="submit">Continue</button>
+</form>
+{{end}}

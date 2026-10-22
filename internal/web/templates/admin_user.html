@@ -1,0 +1,50 @@
+{{define "content"}}
+{{- $d := .Data}}{{$u := $d.User}}
+{{- with $d.Link}}
+<div class="alert alert-ok" role="status">
+  <p>Send {{$u.Username}} this link to choose a new password. It works once, for 72 hours, and won't be shown again. It doesn't change two-factor login.</p>
+  <p><code class="link-out">{{.}}</code></p>
+</div>
+{{- end}}
+<p><a href="/_tabs/admin/users">← All users</a></p>
+<section class="card">
+  <h2>Details</h2>
+  <p class="muted">Created {{when $u.CreatedAt}} · two-factor {{if $u.HasTOTP}}on ({{len $u.RecoveryHashes}} recovery codes left){{else}}off{{end}} · {{$d.Sessions}} session{{if ne $d.Sessions 1}}s{{end}}</p>
+  <form method="post" action="/_tabs/admin/users/{{$u.ID}}" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="save">
+    <label>Display name <input name="name" maxlength="100" value="{{$u.Name}}"></label>
+    <label>Email <input type="email" name="email" maxlength="254" value="{{$u.Email}}"></label>
+    {{template "group-boxes" (dict "Groups" $d.Groups "Checked" $u.Groups)}}
+    <label class="check"><input type="checkbox" name="admin"{{if $u.Admin}} checked{{end}}> Admin</label>
+    {{- if not $d.Self}}
+    <label class="check"><input type="checkbox" name="disabled"{{if $u.Disabled}} checked{{end}}> Disabled (can't log in; ends their sessions)</label>
+    {{- end}}
+    <button type="submit">Save</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Actions</h2>
+  <div class="actions">
+    {{- if $u.Locked}}
+    {{template "user-action" (dict "CSRF" $.CSRF "ID" $u.ID "Action" "unlock" "Label" "Unlock account")}}
+    {{- end}}
+    {{template "user-action" (dict "CSRF" $.CSRF "ID" $u.ID "Action" "reset-link" "Label" "Make a password link")}}
+    {{- if $u.HasTOTP}}
+    {{template "user-action" (dict "CSRF" $.CSRF "ID" $u.ID "Action" "reset-totp" "Label" "Clear two-factor login")}}
+    {{- end}}
+    {{template "user-action" (dict "CSRF" $.CSRF "ID" $u.ID "Action" "revoke" "Label" "End their sessions")}}
+  </div>
+</section>
+{{- if not $d.Self}}
+<section class="card">
+  <h2>Delete</h2>
+  <form method="post" action="/_tabs/admin/users/{{$u.ID}}" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="delete">
+    <label>Type <strong>{{$u.Username}}</strong> to confirm <input name="confirm" autocomplete="off" required></label>
+    <button type="submit" class="danger">Delete user</button>
+  </form>
+</section>
+{{- end}}
+{{end}}

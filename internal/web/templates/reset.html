@@ -1,0 +1,14 @@
+{{define "content"}}
+<p>Choose a new password for <strong>{{.Data.Username}}</strong>.</p>
+<form method="post" action="/_tabs/reset" class="stack">
+  <input type="text" name="username" value="{{.Data.Username}}" autocomplete="username" hidden>
+  <label>New password
+    <input type="password" name="password" autocomplete="new-password" required minlength="{{.Data.MinPasswordLen}}" maxlength="256" autofocus>
+    <small>At least {{.Data.MinPasswordLen}} characters.</small>
+  </label>
+  <label>Confirm password
+    <input type="password" name="confirm" autocomplete="new-password" required minlength="{{.Data.MinPasswordLen}}" maxlength="256">
+  </label>
+  <button type="submit">Set password</button>
+</form>
+{{end}}

@@ -35,10 +35,14 @@
       </ul>
     </nav>
     <footer class="viewer">
-      <span class="viewer-name" title="{{.Viewer.User}}">{{.Viewer.Name}}</span>
-      {{- if .LogoutURL}}
-      <a class="logout" href="{{.LogoutURL}}">Log out</a>
+      <a class="viewer-name" href="{{.AccountURL}}" title="Account settings for {{.Viewer.User}}">{{.Viewer.Name}}</a>
+      {{- if .Admin}}
+      <a class="admin-link" href="{{.AdminURL}}">Admin</a>
       {{- end}}
+      <form method="post" action="/_tabs/logout" class="logout-form">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button type="submit" class="logout">Log out</button>
+      </form>
     </footer>
   </aside>
   <div class="scrim" id="scrim" hidden></div>

@@ -1,0 +1,7 @@
+{{define "content"}}
+{{- with .Data.Note}}<p class="muted">{{.}}</p>{{end}}
+<form method="post" action="/_tabs/invite" class="stack">
+  {{template "newuser" .Data}}
+  <button type="submit">Create account</button>
+</form>
+{{end}}

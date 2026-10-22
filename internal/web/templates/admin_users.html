@@ -1,0 +1,43 @@
+{{define "content"}}
+{{- $d := .Data}}
+{{- with $d.Link}}
+<div class="alert alert-ok" role="status">
+  <p>Created <strong>{{$d.For}}</strong>. Send them this link to choose a password. It works once, for 72 hours, and won't be shown again:</p>
+  <p><code class="link-out">{{.}}</code></p>
+</div>
+{{- end}}
+<section class="card">
+  <table>
+    <thead><tr><th>User</th><th>Name</th><th>Groups</th><th>Two-factor</th><th>Status</th></tr></thead>
+    <tbody>
+    {{- range $d.Users}}
+    <tr>
+      <td><a href="/_tabs/admin/users/{{.ID}}">{{.Username}}</a>{{if .Admin}} <span class="badge">admin</span>{{end}}</td>
+      <td>{{.Name}}</td>
+      <td>{{range $i, $g := .Groups}}{{if $i}}, {{end}}{{$g}}{{end}}</td>
+      <td>{{if .HasTOTP}}on{{else}}off{{end}}</td>
+      <td>{{if .Disabled}}<span class="badge badge-bad">disabled</span>{{else if .Locked}}<span class="badge badge-bad">locked</span>{{else if .MustChangePassword}}must change password{{else if not .PasswordHash}}link pending{{else}}active{{end}}</td>
+    </tr>
+    {{- end}}
+    </tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>Add a user</h2>
+  <p class="muted">To let someone sign themselves up, use an <a href="/_tabs/admin/invites">invite</a> instead.</p>
+  <form method="post" action="/_tabs/admin/users" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="create">
+    <label>Username <input name="username" autocapitalize="none" spellcheck="false" required maxlength="64"></label>
+    <label>Display name <input name="name" maxlength="100"></label>
+    <label>Email (optional) <input type="email" name="email" maxlength="254"></label>
+    {{template "group-boxes" (dict "Groups" $d.Groups "Checked" nil)}}
+    <label class="check"><input type="checkbox" name="admin"> Admin</label>
+    <label>Temporary password (optional)
+      <input type="password" name="password" autocomplete="new-password" maxlength="256">
+      <small>Leave empty to get a one-time link where they choose their own. With a temporary password they must change it at first login.</small>
+    </label>
+    <button type="submit">Add user</button>
+  </form>
+</section>
+{{end}}

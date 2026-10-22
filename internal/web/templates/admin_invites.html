@@ -1,0 +1,49 @@
+{{define "content"}}
+{{- $d := .Data}}
+{{- with $d.Link}}
+<div class="alert alert-ok" role="status">
+  <p>Invite created. Send this link; it won't be shown again:</p>
+  <p><code class="link-out">{{.}}</code></p>
+</div>
+{{- end}}
+<section class="card">
+  <h2>New invite</h2>
+  <form method="post" action="/_tabs/admin/invites" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="create">
+    {{template "group-boxes" (dict "Groups" $d.Groups "Checked" nil)}}
+    <label>Expires after (hours) <input type="number" name="hours" min="1" max="{{$d.MaxHours}}" value="{{$d.DefaultHours}}" required></label>
+    <label>Uses <input type="number" name="uses" min="1" max="100" value="1" required></label>
+    <label>Note (shown to whoever opens it) <input name="note" maxlength="100"></label>
+    <p class="muted">Invites never make admins.</p>
+    <button type="submit">Create invite</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Open invites</h2>
+  <table>
+    <thead><tr><th>Note</th><th>Groups</th><th>Used</th><th>Expires</th><th>By</th><th></th></tr></thead>
+    <tbody>
+    {{- range $d.Invites}}
+    <tr>
+      <td>{{.Note}}</td>
+      <td>{{range $i, $g := .Groups}}{{if $i}}, {{end}}{{$g}}{{end}}</td>
+      <td>{{.Uses}}/{{.MaxUses}}</td>
+      <td>{{when .ExpiresAt}}</td>
+      <td>{{.CreatedBy}}</td>
+      <td>
+        <form method="post" action="/_tabs/admin/invites" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="action" value="revoke">
+          <input type="hidden" name="invite" value="{{.Short}}">
+          <button type="submit" class="link">Revoke</button>
+        </form>
+      </td>
+    </tr>
+    {{- else}}
+    <tr><td colspan="6" class="muted">None.</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+</section>
+{{end}}

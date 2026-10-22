@@ -1,0 +1,12 @@
+{{define "content"}}
+<form method="post" action="/_tabs/login" class="stack">
+  <input type="hidden" name="next" value="{{.Data.Next}}">
+  <label>Username
+    <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" value="{{.Data.Username}}" autofocus>
+  </label>
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password" required maxlength="1024">
+  </label>
+  <button type="submit">Log in</button>
+</form>
+{{end}}

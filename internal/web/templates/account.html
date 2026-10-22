@@ -1,0 +1,143 @@
+{{define "content"}}
+{{- $d := .Data}}
+{{- if eq $d.State "must-change-pw"}}
+<p>Your password was set by an admin. Choose your own to continue.</p>
+{{template "password-form" .}}
+
+{{- else if eq $d.State "must-enrol"}}
+<p>One of your groups requires two-factor login. Set it up to continue.</p>
+{{template "totp-enrol" .}}
+
+{{- else}}
+<section class="card">
+  <h2>Profile</h2>
+  <p class="muted">Username: <strong>{{$d.User.Username}}</strong>{{if $d.User.Admin}} · admin{{end}}</p>
+  <p class="muted">Groups: {{range $i, $g := $d.User.Groups}}{{if $i}}, {{end}}{{$g}}{{else}}none{{end}}</p>
+  <form method="post" action="/_tabs/account" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="profile">
+    <label>Display name
+      <input name="name" autocomplete="name" maxlength="100" value="{{$d.User.Name}}">
+    </label>
+    <label>Email (optional)
+      <input type="email" name="email" autocomplete="email" maxlength="254" value="{{$d.User.Email}}">
+    </label>
+    <button type="submit">Save</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Password</h2>
+  {{template "password-form" .}}
+</section>
+
+<section class="card">
+  <h2>Two-factor login</h2>
+  {{- if $d.User.HasTOTP}}
+  <p>On. You have {{$d.RecoveryLeft}} recovery code{{if ne $d.RecoveryLeft 1}}s{{end}} left.</p>
+  <form method="post" action="/_tabs/account" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="recovery">
+    <label>Current password
+      <input type="password" name="current" autocomplete="current-password" required maxlength="1024">
+    </label>
+    <button type="submit">Make new recovery codes</button>
+  </form>
+  {{- if $d.TOTPRequired}}
+  <p class="muted">One of your groups requires two-factor login, so it can't be turned off.</p>
+  {{- else}}
+  <details>
+    <summary>Turn off two-factor login</summary>
+    <form method="post" action="/_tabs/account" class="stack">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="hidden" name="action" value="totp-disable">
+      <label>Current password
+        <input type="password" name="current" autocomplete="current-password" required maxlength="1024">
+      </label>
+      <label>Current code
+        <input name="code" autocomplete="one-time-code" inputmode="numeric" required maxlength="8">
+      </label>
+      <button type="submit" class="danger">Turn off</button>
+    </form>
+  </details>
+  {{- end}}
+  {{- else}}
+  {{template "totp-enrol" .}}
+  {{- end}}
+</section>
+
+<section class="card">
+  <h2>Sessions</h2>
+  <table>
+    <thead><tr><th>Started</th><th>Last seen</th><th>Browser</th><th></th></tr></thead>
+    <tbody>
+    {{- range $d.Sessions}}
+    <tr>
+      <td>{{.Created}}</td><td>{{.Seen}}</td><td class="agent">{{.Agent}}</td>
+      <td>
+        {{- if .Current}}this one{{else}}
+        <form method="post" action="/_tabs/account" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="action" value="revoke">
+          <input type="hidden" name="session" value="{{.ID}}">
+          <button type="submit" class="link">End</button>
+        </form>
+        {{- end}}
+      </td>
+    </tr>
+    {{- end}}
+    </tbody>
+  </table>
+  <form method="post" action="/_tabs/account">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="revoke-others">
+    <button type="submit">Log out everywhere else</button>
+  </form>
+</section>
+{{- end}}
+{{end}}
+
+{{define "password-form"}}
+<form method="post" action="/_tabs/account" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="action" value="password">
+  <input type="hidden" name="next" value="{{.Data.Next}}">
+  <input type="text" name="username" value="{{.Data.User.Username}}" autocomplete="username" hidden>
+  <label>Current password
+    <input type="password" name="current" autocomplete="current-password" required maxlength="1024">
+  </label>
+  <label>New password
+    <input type="password" name="new" autocomplete="new-password" required minlength="{{.Data.MinPasswordLen}}" maxlength="256">
+    <small>At least {{.Data.MinPasswordLen}} characters. Changing it logs you out everywhere else.</small>
+  </label>
+  <label>Confirm new password
+    <input type="password" name="confirm" autocomplete="new-password" required minlength="{{.Data.MinPasswordLen}}" maxlength="256">
+  </label>
+  <button type="submit">Change password</button>
+</form>
+{{end}}
+
+{{define "totp-enrol"}}
+{{- with .Data.Enrol}}
+<p>Scan this with an authenticator app (1Password, Aegis, Google Authenticator…), then enter the code it shows.</p>
+<img class="qr" src="{{.QR}}" alt="QR code for your authenticator app" width="246" height="246">
+<p class="muted">Can't scan? Enter this key: <code class="secret">{{.Secret}}</code></p>
+<form method="post" action="/_tabs/account" class="stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <input type="hidden" name="action" value="totp-confirm">
+  <input type="hidden" name="next" value="{{$.Data.Next}}">
+  <label>Code from the app
+    <input name="code" autocomplete="one-time-code" inputmode="numeric" required maxlength="8" autofocus>
+  </label>
+  <button type="submit">Turn on</button>
+</form>
+{{- else}}
+<p>Off. With it on, logging in also needs a code from an app on your phone.</p>
+<form method="post" action="/_tabs/account">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="action" value="totp-begin">
+  <input type="hidden" name="next" value="{{.Data.Next}}">
+  <button type="submit">Set up two-factor login</button>
+</form>
+{{- end}}
+{{end}}

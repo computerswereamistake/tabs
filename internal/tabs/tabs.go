@@ -13,6 +13,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -24,10 +25,10 @@ type Tab struct {
 	Name   string   `yaml:"name"`   // display name
 	URL    string   `yaml:"url"`    // iframe src: a "/path/" or an absolute https:// URL
 	Icon   string   `yaml:"icon"`   // file name under the icons dir; optional
-	Groups []string `yaml:"groups"` // empty = any authenticated viewer
+	Groups []string `yaml:"groups"` // empty = any logged-in viewer
 }
 
-// Viewer is who is looking, built only from forward-auth headers.
+// Viewer is who is looking: a logged-in user's name and groups.
 type Viewer struct {
 	User   string
 	Name   string
@@ -36,33 +37,12 @@ type Viewer struct {
 
 // Config is the parsed YAML file.
 type Config struct {
-	Title     string `yaml:"title"`
+	Title string `yaml:"title"`
+	Tabs  []Tab  `yaml:"tabs"` // order = sidebar order
+
+	// LogoutURL is no longer used: tabs handles logout itself. It is still
+	// parsed so an old config gets a clear error instead of "unknown field".
 	LogoutURL string `yaml:"logoutURL"`
-	Tabs      []Tab  `yaml:"tabs"` // order = sidebar order
-}
-
-// ErrNoUser is returned by NewViewer when the user header is missing or empty.
-var ErrNoUser = errors.New("missing remote user")
-
-// NewViewer builds a Viewer from the raw Remote-User, Remote-Name and
-// Remote-Groups header values. Groups are comma-separated; entries are
-// trimmed and empties dropped. Name falls back to User.
-func NewViewer(user, name, groups string) (Viewer, error) {
-	user = strings.TrimSpace(user)
-	if user == "" {
-		return Viewer{}, ErrNoUser
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		name = user
-	}
-	var gs []string
-	for g := range strings.SplitSeq(groups, ",") {
-		if g = strings.TrimSpace(g); g != "" {
-			gs = append(gs, g)
-		}
-	}
-	return Viewer{User: user, Name: name, Groups: gs}, nil
 }
 
 // CanSee reports whether v may see t. Group matching is exact and
@@ -92,15 +72,16 @@ func (c Config) VisibleTo(v Viewer) []Tab {
 
 var slugRE = regexp.MustCompile(`^[a-z0-9-]+$`)
 
+// groupRE matches group names as tabs stores them.
+var groupRE = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
 // Validate checks the config is safe and coherent.
 func (c Config) Validate() error {
 	if len(c.Tabs) == 0 {
 		return errors.New("at least one tab is required")
 	}
 	if c.LogoutURL != "" {
-		if err := checkURL(c.LogoutURL); err != nil {
-			return fmt.Errorf("logoutURL: %w", err)
-		}
+		return errors.New("logoutURL is no longer used (tabs handles logout itself); remove it")
 	}
 	seen := make(map[string]bool, len(c.Tabs))
 	for i, t := range c.Tabs {
@@ -119,6 +100,11 @@ func (c Config) Validate() error {
 		}
 		if isOwnPath(t.URL) {
 			return fmt.Errorf("tab %q: url %q points at this app, which cannot be framed", t.Slug, t.URL)
+		}
+		for _, g := range t.Groups {
+			if !groupRE.MatchString(g) {
+				return fmt.Errorf("tab %q: group %q must match %s", t.Slug, g, groupRE)
+			}
 		}
 		if t.Icon != "" {
 			if strings.Contains(t.Icon, "/") || strings.Contains(t.Icon, `\`) || strings.Contains(t.Icon, "..") {
@@ -192,6 +178,52 @@ func checkURL(s string) error {
 		return fmt.Errorf("%q: host %q must be a plain hostname", s, u.Hostname())
 	}
 	return nil
+}
+
+// Tab returns the tab with the given slug.
+func (c Config) Tab(slug string) (Tab, bool) {
+	for _, t := range c.Tabs {
+		if t.Slug == slug {
+			return t, true
+		}
+	}
+	return Tab{}, false
+}
+
+// Host returns the host[:port] a tab is served from, lower-cased, or "" for
+// a same-origin tab (served from the portal host).
+func (t Tab) Host() string {
+	if strings.HasPrefix(t.URL, "/") {
+		return ""
+	}
+	u, err := url.Parse(t.URL)
+	if err != nil {
+		return ""
+	}
+	return CanonicalHost(u.Host)
+}
+
+// CanonicalHost lower-cases a host[:port], drops a trailing dot and the
+// default https port, so hosts compare equal however they were written.
+// Anything that isn't a plain host[:port] gives "".
+func CanonicalHost(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	host, port := h, ""
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h, "]") {
+		host, port = h[:i], h[i+1:]
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || strings.Trim(port, "0123456789") != "" {
+			return ""
+		}
+	}
+	host = strings.TrimSuffix(host, ".")
+	if !hostRE.MatchString(host) {
+		return ""
+	}
+	if port == "" || port == "443" {
+		return host
+	}
+	return host + ":" + port
 }
 
 // FrameOrigins returns the distinct origins of absolute tab URLs, in config

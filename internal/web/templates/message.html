@@ -1,0 +1,6 @@
+{{define "content"}}
+<p>{{.Data.Text}}</p>
+{{- with .Data.Link}}
+<p><a class="button" href="{{.}}">{{$.Data.LinkText}}</a></p>
+{{- end}}
+{{end}}

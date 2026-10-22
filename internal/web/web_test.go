@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1060,3 +1061,115 @@ func TestParseTrustedProxies(t *testing.T) {
 }
 
 func itoa(n uint64) string { return strconv.FormatUint(n, 10) }
+
+func TestLimitKeyGroupsIPv6(t *testing.T) {
+	e := newEnv(t)
+	for xff, want := range map[string]string{
+		"2001:db8:1:2:aaaa::1": "2001:db8:1:2::/64",
+		"2001:db8:1:2:bbbb::9": "2001:db8:1:2::/64",
+		"198.51.100.7":         "198.51.100.7",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = proxyAddr
+		req.Header.Set("X-Forwarded-For", xff)
+		if got := e.s.limitKey(req); got != want {
+			t.Errorf("limitKey(%s) = %s, want %s", xff, got, want)
+		}
+	}
+	// Rotating addresses inside one /64 still gets banned.
+	b := e.browser()
+	for i := range 10 {
+		b.ip = fmt.Sprintf("2001:db8:1:2::%x", i+1)
+		b.request("POST", authBase+pathLogin, url.Values{"username": {"nobody"}, "password": {"x"}}, nil)
+		e.now = e.now.Add(time.Minute) // past the backoff
+	}
+	b.ip = "2001:db8:1:2::ffff"
+	if rr := b.request("POST", authBase+pathLogin, url.Values{"username": {"x"}, "password": {"y"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Errorf("rotated /64 address = %d", rr.Code)
+	}
+}
+
+func TestInFlightCap(t *testing.T) {
+	e := newEnv(t)
+	for i := range maxInFlight {
+		if !e.s.acquire("1.2.3.4", "u:bob") {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if e.s.acquire("1.2.3.4", "u:ann") || e.s.acquire("5.6.7.8", "u:bob") {
+		t.Error("third concurrent check allowed")
+	}
+	e.s.release("1.2.3.4", "u:bob")
+	if !e.s.acquire("1.2.3.4", "u:ann") {
+		t.Error("slot not freed")
+	}
+	e.s.release("1.2.3.4", "u:ann")
+	e.s.release("1.2.3.4", "u:bob")
+	if len(e.s.inFlight) != 0 {
+		t.Errorf("leaked slots: %v", e.s.inFlight)
+	}
+	// A whole login releases its slots.
+	e.user("bob", false)
+	e.browser().login("bob", "password-for-bob")
+	if len(e.s.inFlight) != 0 {
+		t.Errorf("login leaked slots: %v", e.s.inFlight)
+	}
+}
+
+func TestAdminsAreNeverLocked(t *testing.T) {
+	e := newEnv(t)
+	e.s.opts.LockAfter = 2
+	ann := e.user("ann", true)
+	b := e.browser()
+	for range 3 {
+		b.request("POST", authBase+pathLogin, url.Values{"username": {"ann"}, "password": {"wrong password"}}, nil)
+		e.now = e.now.Add(time.Hour)
+	}
+	if u, _ := e.st.UserByID(ann.ID); u.Locked {
+		t.Error("admin locked by failed logins")
+	}
+}
+
+func TestLockedUserCantFinishTOTP(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false)
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.enrol(bob)
+	c := e.browser()
+	c.login("bob", "password-for-bob") // now pending
+	_, _ = e.st.UpdateUser(bob.ID, func(u *store.User) error { u.Locked = true; return nil })
+	rr := c.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {c.csrf()}, "code": {e.totpCode(bob, e.now)}}, nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("locked user passed the TOTP step: %d", rr.Code)
+	}
+}
+
+func TestRecoveryRegenNeedsCode(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false)
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.enrol(bob)
+	b.follow("GET", authBase+pathAccount, nil)
+	rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"recovery"}, "current": {"password-for-bob"}}, nil)
+	if rr.Code != http.StatusUnauthorized || strings.Contains(rr.Body.String(), "Recovery codes") {
+		t.Errorf("recovery codes without a TOTP code: %d", rr.Code)
+	}
+	rr = b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"recovery"}, "current": {"password-for-bob"}, "code": {e.totpCode(bob, e.now)}}, nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Recovery codes") {
+		t.Errorf("recovery codes with password and code: %d", rr.Code)
+	}
+}
+
+func TestUsersCantSetTheirOwnEmail(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false)
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.follow("GET", authBase+pathAccount, nil)
+	b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"profile"}, "name": {"Bob"}, "email": {"ceo@example.com"}}, nil)
+	if u, _ := e.st.UserByID(bob.ID); u.Email != "" || u.Name != "Bob" {
+		t.Errorf("after profile save: name %q email %q", u.Name, u.Email)
+	}
+}

@@ -147,12 +147,11 @@ func (s *Server) serveAccount(w http.ResponseWriter, r *http.Request, st *state)
 
 	switch action {
 	case "profile":
+		// Only the display name: the email is sent to apps as Remote-Email
+		// and some match accounts on it, so only admins set it.
 		name, err := store.CleanName(r.PostFormValue("name"))
 		if err == nil {
-			var email string
-			if email, err = store.CleanEmail(r.PostFormValue("email")); err == nil {
-				_, err = s.store.UpdateUser(a.user.ID, func(u *store.User) error { u.Name, u.Email = name, email; return nil })
-			}
+			_, err = s.store.UpdateUser(a.user.ID, func(u *store.User) error { u.Name = name; return nil })
 		}
 		if err != nil {
 			show(http.StatusBadRequest, a, userError(err), "")
@@ -297,7 +296,9 @@ func (s *Server) serveAccount(w http.ResponseWriter, r *http.Request, st *state)
 			show(http.StatusBadRequest, a, "Two-factor login isn't set up.", "")
 			return
 		}
-		if !s.checkCurrentPassword(w, r, a, show) {
+		// New codes bypass the authenticator from then on, so prove you
+		// still have it.
+		if !s.checkCurrentPassword(w, r, a, show) || !s.checkCurrentCode(w, r, a, show) {
 			return
 		}
 		codes, hashes, err := auth.NewRecoveryCodes()
@@ -377,10 +378,11 @@ type recoveryData struct {
 // checkCurrentPassword re-checks the password before a security change,
 // counting failures like a login.
 func (s *Server) checkCurrentPassword(w http.ResponseWriter, r *http.Request, a *authed, show func(int, *authed, string, string)) bool {
-	ip := s.clientIP(r)
+	ip := s.limitKey(r)
 	if s.throttled(w, r, a.user.Username, ip, func(msg string) { show(http.StatusTooManyRequests, a, msg, "") }) {
 		return false
 	}
+	defer s.release(ip, "u:"+a.user.Username)
 	ok, err := auth.VerifyPassword(a.user.PasswordHash, r.PostFormValue("current"))
 	if errors.Is(err, auth.ErrBusy) {
 		http.Error(w, "busy; try again in a moment", http.StatusServiceUnavailable)
@@ -411,7 +413,7 @@ func (s *Server) checkCurrentCode(w http.ResponseWriter, r *http.Request, a *aut
 		return nil
 	})
 	if errors.Is(err, errBadCode) {
-		s.failed(r, a.user.Username, s.clientIP(r), 0, "reauth-totp-failed")
+		s.failed(r, a.user.Username, s.limitKey(r), 0, "reauth-totp-failed")
 		show(http.StatusUnauthorized, a, "That code didn't work.", "")
 		return false
 	}

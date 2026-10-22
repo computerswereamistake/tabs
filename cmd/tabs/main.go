@@ -180,7 +180,34 @@ func integer(d deps, key string, def int) (int, error) {
 	return n, nil
 }
 
-const keyCheckMeta = "key-check"
+const (
+	keyCheckMeta     = "key-check"
+	offlineAuditMeta = "offline-audit" // events from recover/rekey, logged at next start
+)
+
+// recordOffline notes an offline command in the database, so the server's
+// audit log shows it at its next start (the commands run with it stopped).
+func recordOffline(st *store.Store, event string) error {
+	prev, err := st.Meta(offlineAuditMeta)
+	if err != nil {
+		return err
+	}
+	line := time.Now().UTC().Format(time.RFC3339) + " " + event + "\n"
+	return st.SetMeta(offlineAuditMeta, append(prev, line...))
+}
+
+// logOffline logs and clears what recordOffline saved.
+func logOffline(st *store.Store, log *slog.Logger) error {
+	raw, err := st.Meta(offlineAuditMeta)
+	if err != nil || len(raw) == 0 {
+		return err
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		when, event, _ := strings.Cut(line, " ")
+		log.Info("auth", "event", "offline-command", "at", when, "detail", event)
+	}
+	return st.SetMeta(offlineAuditMeta, nil)
+}
 
 // loadBox reads TABS_SECRET_KEY_FILE and checks it against the database:
 // a wrong key fails startup instead of every two-factor login.
@@ -289,6 +316,9 @@ func run(d deps) error {
 	defer st.Close()
 	box, err := loadBox(d.getenv("TABS_SECRET_KEY_FILE"), st)
 	if err != nil {
+		return err
+	}
+	if err := logOffline(st, log); err != nil {
 		return err
 	}
 
@@ -443,6 +473,13 @@ func recoverCmd(d deps, args []string) error {
 	if err := st.CreateReset(store.Reset{Hash: auth.HashToken(tok), UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		return err
 	}
+	event := "recover user=" + u.Username
+	if resetTOTP {
+		event += " reset-totp"
+	}
+	if err := recordOffline(st, event); err != nil {
+		return err
+	}
 	fmt.Fprintf(d.stdout, "Password link for %s (valid for one hour, works once):\n%s/_tabs/reset/%s\n", u.Username, set.authURL, tok)
 	if resetTOTP {
 		fmt.Fprintln(d.stdout, "Two-factor login was cleared.")
@@ -494,6 +531,9 @@ func rekeyCmd(d deps, args []string) error {
 		return newBox.Seal(id, plain)
 	}, keyCheckMeta, []byte(sentinel))
 	if err != nil {
+		return err
+	}
+	if err := recordOffline(st, fmt.Sprintf("rekey secrets=%d", n)); err != nil {
 		return err
 	}
 	fmt.Fprintf(d.stdout, "Re-encrypted %d secrets. Now set TABS_SECRET_KEY_FILE to %s.\n", n, args[0])

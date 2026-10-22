@@ -286,6 +286,16 @@ func TestRecoverAndRekey(t *testing.T) {
 	if got.Locked || got.HasTOTP() {
 		t.Errorf("after recover: %+v", got)
 	}
+	var logged strings.Builder
+	if err := logOffline(st, slog.New(slog.NewTextHandler(&logged, nil))); err != nil {
+		t.Fatal(err)
+	}
+	if out := logged.String(); !strings.Contains(out, "rekey secrets=1") || !strings.Contains(out, "recover user=root reset-totp") {
+		t.Errorf("offline audit log: %q", out)
+	}
+	if raw, _ := st.Meta(offlineAuditMeta); len(raw) != 0 {
+		t.Error("offline audit not cleared after logging")
+	}
 }
 
 func TestHealthcheck(t *testing.T) {

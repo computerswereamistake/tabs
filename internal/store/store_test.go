@@ -293,12 +293,16 @@ func TestSessionsAndGates(t *testing.T) {
 		t.Fatalf("rotated session: %v %+v", err, got)
 	}
 
-	if err := s.CreateCode(Code{Hash: "c", SessionID: "s", Host: "app.example.com", ExpiresAt: now.Add(time.Minute)}, now, 2); err != nil {
+	// At the cap, the oldest live code makes way for the new one.
+	_ = s.CreateCode(Code{Hash: "old", SessionID: "s", ExpiresAt: now.Add(time.Minute)}, now, 2)
+	if err := s.CreateCode(Code{Hash: "c", SessionID: "s", Host: "app.example.com", ExpiresAt: now.Add(2 * time.Minute)}, now, 2); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.CreateCode(Code{Hash: "c2", SessionID: "s", ExpiresAt: now.Add(time.Minute)}, now, 2)
-	if err := s.CreateCode(Code{Hash: "c3", SessionID: "s", ExpiresAt: now.Add(time.Minute)}, now, 2); !errors.Is(err, ErrTooMany) {
-		t.Errorf("code cap: %v", err)
+	if err := s.CreateCode(Code{Hash: "c3", SessionID: "s", ExpiresAt: now.Add(3 * time.Minute)}, now, 2); err != nil {
+		t.Fatalf("code over the cap: %v", err)
+	}
+	if _, err := s.ConsumeCode("old", now); err == nil {
+		t.Error("oldest code kept past the cap")
 	}
 	if c, err := s.ConsumeCode("c", now); err != nil || c.Host != "app.example.com" {
 		t.Fatalf("ConsumeCode: %v", err)
@@ -306,7 +310,7 @@ func TestSessionsAndGates(t *testing.T) {
 	if _, err := s.ConsumeCode("c", now); err == nil {
 		t.Error("code worked twice")
 	}
-	if _, err := s.ConsumeCode("c2", now.Add(time.Minute)); err == nil {
+	if _, err := s.ConsumeCode("c3", now.Add(3*time.Minute)); err == nil {
 		t.Error("expired code worked")
 	}
 

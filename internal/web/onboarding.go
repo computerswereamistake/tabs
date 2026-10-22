@@ -18,6 +18,7 @@ import (
 const linkCookieTTL = 30 * time.Minute
 
 type newUserData struct {
+	AskEmail       bool // only the first admin sets their own email
 	Note           string
 	Username       string
 	Name           string
@@ -115,7 +116,7 @@ func (s *Server) serveSetup(w http.ResponseWriter, r *http.Request, st *state) {
 		return
 	}
 	show := func(status int, d newUserData, msg string) {
-		d.MinPasswordLen = auth.MinPasswordLen
+		d.MinPasswordLen, d.AskEmail = auth.MinPasswordLen, true
 		p := s.newPage("Create the first admin", nil, d)
 		p.Error = msg
 		s.render(w, r, status, "setup", p)
@@ -186,6 +187,9 @@ func (s *Server) serveInvite(w http.ResponseWriter, r *http.Request, st *state) 
 		show(http.StatusBadRequest, d, formError(err))
 		return
 	}
+	// Emails are sent to apps, which may match accounts on them, so an
+	// invitee can't choose one; an admin can add it later.
+	u.Email = ""
 	if u.PasswordHash, err = auth.HashPassword(pw); err != nil {
 		s.fail(w, r, err)
 		return

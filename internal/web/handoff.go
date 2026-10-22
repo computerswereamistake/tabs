@@ -1,7 +1,6 @@
 package web
 
 import (
-	"errors"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -90,10 +89,6 @@ func (s *Server) serveHandoff(w http.ResponseWriter, r *http.Request, st *state)
 		Hash: auth.HashToken(tok), SessionID: a.sess.ID, Host: host, StateID: flow,
 		State: auth.HashToken(stateVal), Rd: rd, Retry: q.Get("retry") == "1", ExpiresAt: now.Add(codeTTL),
 	}, now, maxLiveCodes)
-	if errors.Is(err, store.ErrTooMany) {
-		http.Error(w, "too many sign-ins in progress; wait a minute", http.StatusTooManyRequests)
-		return
-	}
 	if err != nil {
 		s.fail(w, r, err)
 		return

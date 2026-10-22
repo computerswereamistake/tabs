@@ -19,9 +19,7 @@
     <label>Display name
       <input name="name" autocomplete="name" maxlength="100" value="{{$d.User.Name}}">
     </label>
-    <label>Email (optional)
-      <input type="email" name="email" autocomplete="email" maxlength="254" value="{{$d.User.Email}}">
-    </label>
+    <p class="muted">Email: {{with $d.User.Email}}{{.}}{{else}}none{{end}} (an admin sets this)</p>
     <button type="submit">Save</button>
   </form>
 </section>
@@ -40,6 +38,9 @@
     <input type="hidden" name="action" value="recovery">
     <label>Current password
       <input type="password" name="current" autocomplete="current-password" required maxlength="1024">
+    </label>
+    <label>Current code
+      <input name="code" autocomplete="one-time-code" inputmode="numeric" required maxlength="8">
     </label>
     <button type="submit">Make new recovery codes</button>
   </form>

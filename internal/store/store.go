@@ -42,7 +42,6 @@ var (
 	ErrLastAdmin   = errors.New("that would leave no enabled admin")
 	ErrInviteUsed  = errors.New("invite is expired or used up")
 	ErrInvalid     = errors.New("invalid")
-	ErrTooMany     = errors.New("too many pending requests")
 )
 
 // NameRE is the charset for usernames and group names. Group names match tab
@@ -940,8 +939,9 @@ func deleteSessionsTx(tx *bolt.Tx, match func(Session) bool) error {
 
 // --- handoff codes and gates ---
 
-// CreateCode stores a handoff code. At most maxPending live codes may exist
-// per session, so a looping script can't grow the database.
+// CreateCode stores a handoff code. At most maxPending live codes are kept
+// per session, so a looping script can't grow the database; past that the
+// oldest is dropped, so a hostile page can't block real sign-ins either.
 func (s *Store) CreateCode(c Code, now time.Time, maxPending int) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bSessions).Get([]byte(c.SessionID)) == nil {
@@ -951,14 +951,18 @@ func (s *Store) CreateCode(c Code, now time.Time, maxPending int) error {
 		if err != nil {
 			return err
 		}
-		n := 0
+		var live []Code
 		for _, o := range codes {
 			if o.SessionID == c.SessionID && now.Before(o.ExpiresAt) {
-				n++
+				live = append(live, o)
 			}
 		}
-		if n >= maxPending {
-			return ErrTooMany
+		slices.SortFunc(live, func(a, b Code) int { return a.ExpiresAt.Compare(b.ExpiresAt) })
+		for len(live) >= maxPending {
+			if err := tx.Bucket(bCodes).Delete([]byte(live[0].Hash)); err != nil {
+				return err
+			}
+			live = live[1:]
 		}
 		return put(tx.Bucket(bCodes), []byte(c.Hash), c)
 	})

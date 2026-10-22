@@ -51,10 +51,10 @@ YAML.
   it from the volume, e.g.
   `docker run --rm -v tabs-data:/data busybox cat /data/setup-token`.
 - **Users** have a lowercase username, display name, optional email
-  (passed on as `Remote-Email`), groups and an admin flag. Users can set
-  their own email and it isn't verified (tabs sends no mail), though no two
-  accounts can share one, so apps should identify people by `Remote-User`,
-  not `Remote-Email`. An admin can add
+  (passed on as `Remote-Email`), groups and an admin flag. Only admins set
+  emails, since some apps match accounts on them; no two accounts can share
+  one. Tabs never sends email: invite and password links are shown once in
+  the admin pages for you to pass on however you like. An admin can add
   someone with a temporary password (they must change it at first login) or
   get a one-time link for them to choose their own.
 - **Invites** are links that let someone create their own account, landing in
@@ -72,14 +72,23 @@ YAML.
   or an admin changing someone's admin/disabled status ends all of that user's
   sessions (you stay logged in on the browser that made the change). Group
   changes apply on the next request without logging anyone out.
-- **Failed logins** back off per username and address. Ten failures (password
-  or code) from one address in 15 minutes ban it for an hour; the admin
-  *Bans* page lists and lifts bans. A ban never locks an account, so nobody
-  can lock you out from elsewhere. If you'd rather lock accounts too, set
-  `TABS_LOCK_AFTER`; an admin then has to unlock them.
+- **Failed logins** back off per username and address, with at most two
+  checks running at once for either. Ten failures (password or code) from
+  one address in 15 minutes ban it for an hour (IPv6 addresses count by
+  their /64); the admin *Bans* page lists and lifts bans. A ban never locks
+  an account, so nobody can lock you out from elsewhere. If you'd rather
+  lock accounts too, set `TABS_LOCK_AFTER`; an admin then has to unlock
+  them. Admins are never locked, or anyone who knew their usernames could
+  lock every admin out.
+- **Recovery codes** are shown once when two-factor is turned on, for the
+  user to save; nobody can send them. Making new ones needs the password and
+  a current code. If someone loses both their authenticator and their codes,
+  an admin clears their two-factor login from their user page (and makes a
+  password link if they've forgotten that too).
 - **Locked out?** Stop the server and run
   `tabs recover <user> [--reset-totp]`; it prints a one-hour password link and
-  unlocks the account.
+  unlocks the account. `recover` and `rekey` are written to the audit log at
+  the next start.
 
 ## Configuration
 
@@ -235,7 +244,7 @@ are **not** behind `forward_auth` (tabs authenticates them itself):
 		copy_headers Remote-User Remote-Name Remote-Email Remote-Groups
 	}
 	# The app doesn't need the gate cookie; don't hand it over.
-	request_header Cookie "(^|;\s*)__Host-tabs_gate=[^;]*" ""
+	request_header Cookie "(^|;\s*)(__Host-)?tabs_gate=[^;]*" ""
 }
 
 auth.example.com {
@@ -243,6 +252,9 @@ auth.example.com {
 }
 
 tabs.example.com {
+	handle /_tabs/auth/verify {
+		respond 404                       # only forward_auth calls it, directly
+	}
 	handle /app-one/* {
 		import tabs_gate app-one
 		reverse_proxy app-one:80
@@ -253,6 +265,9 @@ tabs.example.com {
 }
 
 other.example.com {                       # a tab with url: https://other.example.com/
+	handle /_tabs/auth/verify {
+		respond 404
+	}
 	handle /_tabs/auth/* {
 		reverse_proxy tabs:8080           # the handoff; not gated
 	}
@@ -270,6 +285,11 @@ other.example.com {                       # a tab with url: https://other.exampl
   if the `request_header` line is ever wrong, a portal app's backend could
   replay a user's gate against other portal apps. Put apps you don't trust on
   their own host.
+- **Keep tokens out of Caddy's access logs.** Setup, handoff and reset
+  links carry one-time tokens in the URL (tabs redacts its own logs). They
+  are short-lived and single-use, but if you keep access logs, filter them
+  out, e.g. `log { format filter { request>uri query { delete token delete
+  code delete state } } }`.
 - Don't give two tabs with different `groups` the same upstream: the gate
   is only as precise as Caddy's path matching.
 - Framed apps that send `X-Frame-Options: DENY` or a restrictive

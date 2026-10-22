@@ -115,6 +115,9 @@ type Server struct {
 
 	lockMu   sync.Mutex
 	failures map[uint64]int // consecutive failed logins per user, for LockAfter
+
+	flightMu sync.Mutex
+	inFlight map[string]int // password/code checks running per address and per username
 }
 
 // New returns a Server. icons should be rooted so that traversal outside it
@@ -138,6 +141,7 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 		portal:     origin(opts.PublicURL),
 		setupToken: opts.SetupToken,
 		failures:   make(map[uint64]int),
+		inFlight:   make(map[string]int),
 	}
 	if s.authHost == "" || s.portalHost == "" || hostname(s.authHost) == hostname(s.portalHost) {
 		return nil, fmt.Errorf("auth and portal URLs must have different hostnames (cookies ignore ports)")
@@ -302,6 +306,53 @@ func (s *Server) clientIP(r *http.Request) string {
 		addr = a
 	}
 	return addr.String()
+}
+
+// limitKey is the client address as bans and rate limits see it: IPv4 as
+// is, IPv6 by its /64, since one subscriber usually gets a whole /64 and
+// could otherwise rotate addresses to dodge a ban.
+func (s *Server) limitKey(r *http.Request) string {
+	ip := s.clientIP(r)
+	a, err := netip.ParseAddr(ip)
+	if err != nil || a.Is4() {
+		return ip
+	}
+	p, err := a.Prefix(64)
+	if err != nil {
+		return ip
+	}
+	return p.String()
+}
+
+// maxInFlight is how many password or code checks may run at once for one
+// address or one username. Failures are only counted once a check ends,
+// so without this a parallel burst could get many guesses in before the
+// limits and ban saw any of them.
+const maxInFlight = 2
+
+// acquire reserves a check slot for every key, or none if any is full.
+func (s *Server) acquire(keys ...string) bool {
+	s.flightMu.Lock()
+	defer s.flightMu.Unlock()
+	for _, k := range keys {
+		if s.inFlight[k] >= maxInFlight {
+			return false
+		}
+	}
+	for _, k := range keys {
+		s.inFlight[k]++
+	}
+	return true
+}
+
+func (s *Server) release(keys ...string) {
+	s.flightMu.Lock()
+	defer s.flightMu.Unlock()
+	for _, k := range keys {
+		if s.inFlight[k]--; s.inFlight[k] <= 0 {
+			delete(s.inFlight, k)
+		}
+	}
 }
 
 // ServeHTTP routes by host, then by exact path or prefix. It does not use

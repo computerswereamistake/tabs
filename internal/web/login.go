@@ -25,7 +25,8 @@ const badLogin = "Wrong username or password."
 
 // throttled reports whether a login attempt for name from ip must wait,
 // writing the response if so (render shows the form again with a message,
-// with status 429).
+// with status 429). When it returns false the caller holds a check slot
+// for ip and name and must call s.release(ip, "u:"+name) when done.
 func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip string, render func(msg string)) bool {
 	if banned, until := s.opts.Banner.Banned(ip); banned {
 		s.audit(r, "banned-attempt", "user", name)
@@ -42,6 +43,11 @@ func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip stri
 			render(fmt.Sprintf("Too many attempts. Try again in %s.", wait.Round(time.Second)))
 			return true
 		}
+	}
+	if !s.acquire(ip, "u:"+name) {
+		w.Header().Set("Retry-After", "2")
+		render("Too many attempts at once. Try again in a moment.")
+		return true
 	}
 	return false
 }
@@ -67,11 +73,21 @@ func (s *Server) failed(r *http.Request, name, ip string, userID uint64, event s
 	}
 	s.lockMu.Unlock()
 	if lock {
-		if _, err := s.store.UpdateUser(userID, func(u *store.User) error { u.Locked = true; return nil }); err != nil {
+		locked := false
+		// Admins are never locked: anyone who knows their usernames could
+		// otherwise lock every admin out. They still get the backoff and
+		// the address ban.
+		if _, err := s.store.UpdateUser(userID, func(u *store.User) error {
+			locked = !u.Admin
+			u.Locked = u.Locked || locked
+			return nil
+		}); err != nil {
 			s.log.Error("lock account", "err", err)
 			return
 		}
-		s.audit(r, "account-locked", "user", name)
+		if locked {
+			s.audit(r, "account-locked", "user", name)
+		}
 	}
 }
 
@@ -113,7 +129,7 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 		name = name[:64]
 	}
 	password := r.PostFormValue("password")
-	ip := s.clientIP(r)
+	ip := s.limitKey(r)
 	if s.throttled(w, r, name, ip, func(msg string) {
 		p := s.newPage("Log in", nil, loginData{Next: next, Username: name})
 		p.Error = msg
@@ -121,6 +137,7 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 	}) {
 		return
 	}
+	defer s.release(ip, "u:"+name)
 
 	u, err := s.store.UserByName(name)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -202,7 +219,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		return
 	}
 	next = authNext(r.PostFormValue("next"))
-	ip := s.clientIP(r)
+	ip := s.limitKey(r)
 	name := a.user.Username
 	if s.throttled(w, r, name, ip, func(msg string) {
 		p := s.newPage("Two-factor code", a, loginData{Next: next})
@@ -211,6 +228,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	}) {
 		return
 	}
+	defer s.release(ip, "u:"+name)
 
 	// Reserve this attempt before checking the code, in one transaction, so
 	// parallel guesses can't all slip in under the cap.
@@ -242,7 +260,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	_, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
 		// Checked and recorded in one transaction, so two requests racing
 		// with the same code can't both pass.
-		if u.AuthEpoch != a.sess.AuthEpoch || !u.HasTOTP() {
+		if u.AuthEpoch != a.sess.AuthEpoch || !u.HasTOTP() || u.Locked {
 			return errBadCode
 		}
 		if digits := strings.ReplaceAll(code, " ", ""); len(digits) == 6 && strings.Trim(digits, "0123456789") == "" {

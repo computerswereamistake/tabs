@@ -6,9 +6,11 @@
   <label>Display name
     <input name="name" autocomplete="name" maxlength="100" value="{{.Name}}">
   </label>
+  {{- if .AskEmail}}
   <label>Email (optional)
     <input type="email" name="email" autocomplete="email" maxlength="254" value="{{.Email}}">
   </label>
+  {{- end}}
   <label>Password
     <input type="password" name="password" autocomplete="new-password" required minlength="{{.MinPasswordLen}}" maxlength="256">
     <small>At least {{.MinPasswordLen}} characters.</small>

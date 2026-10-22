@@ -89,7 +89,7 @@ environment and config file, never in this repo.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `TABS_AUTH_URL` | (required) | Auth host origin, e.g. `https://auth.example.com` |
-| `TABS_PUBLIC_URL` | (required) | Portal origin, e.g. `https://tabs.example.com`; must be a different host |
+| `TABS_PUBLIC_URL` | (required) | Portal origin, e.g. `https://tabs.example.com`; must be a different hostname (a different port isn't enough: cookies ignore ports) |
 | `TABS_TRUSTED_PROXIES` | (required) | Comma-separated IPs/CIDRs of the reverse proxy: the only callers verify answers, and whose `X-Forwarded-For` is believed (see [Trusted proxies](#trusted-proxies)) |
 | `TABS_SECRET_KEY_FILE` | (required) | File holding the key that encrypts TOTP secrets; make one with `tabs genkey` |
 | `TABS_DB` | `/data/tabs.db` | Database file; the directory must be writable |
@@ -118,7 +118,8 @@ See [tabs.example.yaml](tabs.example.yaml). Each tab has:
 - `name`: display name
 - `url`: a same-origin path (`/app/`) or an absolute `https://` URL with a
   plain hostname. It may not point at this app (`/` or `/_tabs/...`) or the
-  auth host.
+  auth host's hostname, and hosts that differ only by port aren't allowed
+  (they would share cookies).
 - `icon` (optional): file name inside `TABS_ICONS_DIR`, one of `.svg .png
   .webp .ico .jpg .jpeg .gif`. Only those types are ever served from that dir.
 - `groups` (optional): viewer must be in at least one; empty means any

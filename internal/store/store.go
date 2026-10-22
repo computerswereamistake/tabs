@@ -36,12 +36,13 @@ var (
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrUsernameTaken = errors.New("username is taken")
-	ErrEmailTaken    = errors.New("that email address belongs to another account")
-	ErrGroupExists   = errors.New("group already exists")
-	ErrLastAdmin     = errors.New("that would leave no enabled admin")
-	ErrInviteUsed    = errors.New("invite is expired or used up")
-	ErrInvalid       = errors.New("invalid")
-	ErrTooMany       = errors.New("too many pending requests")
+	// ErrEmailTaken doesn't say who has the address, or that anyone does.
+	ErrEmailTaken  = errors.New("that email address can't be used")
+	ErrGroupExists = errors.New("group already exists")
+	ErrLastAdmin   = errors.New("that would leave no enabled admin")
+	ErrInviteUsed  = errors.New("invite is expired or used up")
+	ErrInvalid     = errors.New("invalid")
+	ErrTooMany     = errors.New("too many pending requests")
 )
 
 // NameRE is the charset for usernames and group names. Group names match tab
@@ -244,9 +245,11 @@ func CleanName(name string) (string, error) {
 	return name, nil
 }
 
-// emailRE is deliberately plain: one @, no spaces, commas or control
-// characters, since the value is passed on in a Remote-Email header.
-var emailRE = regexp.MustCompile(`^[^@\s,;<>"\x00-\x1f\x7f]+@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+// emailRE is deliberately plain and ASCII-only: one @, no spaces, commas,
+// angle brackets or quotes, since the value is passed on in a Remote-Email
+// header and compared case-insensitively for uniqueness (Unicode case
+// folding would let different-looking addresses collide).
+var emailRE = regexp.MustCompile(`^[!#-'*+\-./0-9=?A-Z^_` + "`" + `a-z{|}~]+@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
 
 // CleanEmail trims and checks an optional email address.
 func CleanEmail(email string) (string, error) {
@@ -407,6 +410,13 @@ func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
 		}
 		if u.AuthEpoch != before.AuthEpoch {
 			if err := deleteSessionsTx(tx, func(x Session) bool { return x.UserID == u.ID }); err != nil {
+				return err
+			}
+		}
+		// A new password voids older reset links, or whoever holds one
+		// could overwrite it.
+		if u.PasswordHash != before.PasswordHash {
+			if err := deleteWhereTx(tx, bResets, func(x Reset) bool { return x.UserID == u.ID }); err != nil {
 				return err
 			}
 		}

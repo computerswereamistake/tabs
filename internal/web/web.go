@@ -139,8 +139,8 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 		setupToken: opts.SetupToken,
 		failures:   make(map[uint64]int),
 	}
-	if s.authHost == "" || s.portalHost == "" || s.authHost == s.portalHost {
-		return nil, fmt.Errorf("auth and portal URLs must be two different hosts")
+	if s.authHost == "" || s.portalHost == "" || hostname(s.authHost) == hostname(s.portalHost) {
+		return nil, fmt.Errorf("auth and portal URLs must have different hostnames (cookies ignore ports)")
 	}
 	// Strict backoff for one username from one address; looser ceilings
 	// per username (so a spray from many addresses still slows) and per
@@ -165,6 +165,14 @@ func (s *Server) Prune() {
 	s.opts.Banner.Prune()
 }
 
+// hostname drops the port from a canonical host[:port].
+func hostname(h string) string {
+	if i := strings.LastIndexByte(h, ':'); i >= 0 {
+		return h[:i]
+	}
+	return h
+}
+
 func origin(u *url.URL) string { return u.Scheme + "://" + u.Host }
 
 func (s *Server) scheme() string {
@@ -178,15 +186,24 @@ func (s *Server) scheme() string {
 // It fails if a tab would live on the auth host.
 func (s *Server) SetConfig(cfg tabs.Config) error {
 	gated := map[string]bool{s.portalHost: true}
+	// Browsers send a host's cookies to every port on it, so each gated
+	// host needs a hostname of its own, and none may be the auth host's:
+	// otherwise an app's backend would receive the auth cookie or another
+	// host's gate.
+	names := map[string]string{hostname(s.portalHost): s.portalHost}
 	var origins []string
 	for _, t := range cfg.Tabs {
 		h := t.Host()
 		if h == "" {
 			continue
 		}
-		if h == s.authHost {
-			return fmt.Errorf("tab %q: may not be served from the auth host %s", t.Slug, s.authHost)
+		if hostname(h) == hostname(s.authHost) {
+			return fmt.Errorf("tab %q: may not be served from the auth host's hostname %s", t.Slug, hostname(s.authHost))
 		}
+		if other, ok := names[hostname(h)]; ok && other != h {
+			return fmt.Errorf("tab %q: %s shares a hostname with %s on another port; cookies would be shared", t.Slug, h, other)
+		}
+		names[hostname(h)] = h
 		if !gated[h] {
 			gated[h] = true
 			origins = append(origins, s.scheme()+"://"+h)
@@ -315,6 +332,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"ip", s.clientIP(r),
 		)
 	}()
+
+	// Limit and parse every form body up front, before any handler can
+	// read a form value: FormValue would otherwise parse an unlimited body
+	// and cache it for every later check.
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(rec, r.Body, maxFormBytes)
+		if err := r.ParseForm(); err != nil {
+			h.Set("Content-Security-Policy", st.appCSP)
+			http.Error(rec, "bad request", http.StatusBadRequest)
+			return
+		}
+	}
 
 	p := r.URL.Path
 	switch {

@@ -971,11 +971,47 @@ func TestIndexEmptyState(t *testing.T) {
 	}
 }
 
-func TestSetConfigRejectsAuthHostTab(t *testing.T) {
+func TestSetConfigRejectsSharedHostnames(t *testing.T) {
 	e := newEnv(t)
-	err := e.s.SetConfig(tabs.Config{Title: "T", Tabs: []tabs.Tab{{Slug: "a", Name: "A", URL: authBase + "/app/"}}})
+	for _, u := range []string{
+		authBase + "/app/",
+		"https://auth.example.com:8443/", // cookies ignore ports
+		"https://tabs.example.com:8443/", // would share the portal's gate
+	} {
+		if err := e.s.SetConfig(tabs.Config{Title: "T", Tabs: []tabs.Tab{{Slug: "a", Name: "A", URL: u}}}); err == nil {
+			t.Errorf("tab at %s accepted", u)
+		}
+	}
+	err := e.s.SetConfig(tabs.Config{Title: "T", Tabs: []tabs.Tab{
+		{Slug: "a", Name: "A", URL: "https://app.example.com/"},
+		{Slug: "b", Name: "B", URL: "https://app.example.com:8443/"},
+	}})
 	if err == nil {
-		t.Error("tab on the auth host accepted")
+		t.Error("two tab hosts sharing a hostname accepted")
+	}
+}
+
+func TestNewRejectsSharedHostname(t *testing.T) {
+	st, _ := store.Open(filepath.Join(t.TempDir(), "tabs.db"))
+	defer st.Close()
+	au, _ := url.Parse("https://example.com:8443")
+	pu, _ := url.Parse("https://example.com")
+	_, err := New(testConfig(), st, Options{AuthURL: au, PublicURL: pu}, fstest.MapFS{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Error("auth and portal on one hostname accepted")
+	}
+}
+
+func TestOversizedFormRefused(t *testing.T) {
+	e := newEnv(t)
+	e.user("bob", false)
+	b := e.browser()
+	big := url.Values{"username": {"bob"}, "password": {"password-for-bob"}, "pad": {strings.Repeat("x", maxFormBytes)}}
+	if rr := b.request("POST", authBase+pathLogin, big, nil); rr.Code != http.StatusBadRequest {
+		t.Errorf("oversized login = %d", rr.Code)
+	}
+	if _, ok := b.cookies["auth.example.com"]["__Host-tabs_auth"]; ok {
+		t.Error("oversized login logged in")
 	}
 }
 

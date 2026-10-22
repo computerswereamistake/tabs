@@ -85,7 +85,8 @@ func TestRunStartupErrors(t *testing.T) {
 		{"no auth url", func(f *fixture) { delete(f.env, "TABS_AUTH_URL") }, "TABS_AUTH_URL is required"},
 		{"auth url with path", func(f *fixture) { f.env["TABS_AUTH_URL"] = "http://auth.localhost/x" }, "bare"},
 		{"https required", func(f *fixture) { delete(f.env, "TABS_INSECURE_COOKIES") }, "bare https://"},
-		{"same host twice", func(f *fixture) { f.env["TABS_PUBLIC_URL"] = "http://AUTH.localhost" }, "different hosts"},
+		{"same host twice", func(f *fixture) { f.env["TABS_PUBLIC_URL"] = "http://AUTH.localhost" }, "different hostnames"},
+		{"same hostname, other port", func(f *fixture) { f.env["TABS_PUBLIC_URL"] = "http://auth.localhost:8443" }, "different hostnames"},
 		{"insecure off localhost", func(f *fixture) {
 			f.env["TABS_AUTH_URL"] = "http://auth.example.com"
 		}, "only allowed for localhost"},

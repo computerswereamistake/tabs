@@ -348,7 +348,7 @@ func TestValidation(t *testing.T) {
 			t.Errorf("NormalizeUsername(%q) = %v", in, err)
 		}
 	}
-	for in, ok := range map[string]bool{"": true, "a@example.com": true, "a@b@c": false, "a@example.com\r\nX: y": false, "a,b@example.com": false, "x@": false} {
+	for in, ok := range map[string]bool{"": true, "a@example.com": true, "a@b@c": false, "a@example.com\r\nX: y": false, "a,b@example.com": false, "x@": false, "\u212a@example.com": false, "o'brien+x@example.com": true, "a b@example.com": false} {
 		if _, err := CleanEmail(in); (err == nil) != ok {
 			t.Errorf("CleanEmail(%q) = %v", in, err)
 		}
@@ -378,5 +378,23 @@ func TestEmailUnique(t *testing.T) {
 	}
 	if _, err := s.UpdateUser(a.ID, func(u *User) error { u.Email = "A@EXAMPLE.COM"; return nil }); err != nil {
 		t.Errorf("changing the case of your own email: %v", err)
+	}
+}
+
+func TestPasswordChangeVoidsResets(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	_ = s.CreateReset(Reset{Hash: "r", UserID: u.ID, ExpiresAt: now.Add(time.Hour)})
+	if _, err := s.UpdateUser(u.ID, func(x *User) error { x.Name = "Al"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Reset("r", now); err != nil {
+		t.Fatal("a name change voided the reset link")
+	}
+	if _, err := s.UpdateUser(u.ID, func(x *User) error { x.PasswordHash = "new"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RedeemReset("r", now, "attacker"); err == nil {
+		t.Error("reset link still works after a password change")
 	}
 }

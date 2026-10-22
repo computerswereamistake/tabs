@@ -109,8 +109,9 @@ func loadSettings(d deps) (settings, error) {
 	if st.publicURL, err = originURL("TABS_PUBLIC_URL", d.getenv("TABS_PUBLIC_URL"), st.insecure); err != nil {
 		return st, err
 	}
-	if tabs.CanonicalHost(st.authURL.Host) == tabs.CanonicalHost(st.publicURL.Host) {
-		return st, errors.New("TABS_AUTH_URL and TABS_PUBLIC_URL must be different hosts, so framed apps can't reach the admin pages")
+	// Compare hostnames, not host:port: browsers send cookies to every port.
+	if strings.EqualFold(st.authURL.Hostname(), st.publicURL.Hostname()) {
+		return st, errors.New("TABS_AUTH_URL and TABS_PUBLIC_URL must have different hostnames (cookies ignore ports), so framed apps can't reach the admin pages")
 	}
 	return st, nil
 }

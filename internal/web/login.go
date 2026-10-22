@@ -26,7 +26,12 @@ const badLogin = "Wrong username or password."
 // throttled reports whether a login attempt for name from ip must wait,
 // writing the response if so (render shows the form again with a message,
 // with status 429). When it returns false the caller holds a check slot
-// for ip and name and must call s.release(ip, "u:"+name) when done.
+// for ip and must call s.release(ip) when done.
+//
+// Per address, at most maxInFlight checks run at once. Per username there
+// is no such hard cap (that would let anyone hold a user's slots and lock
+// them out); instead each attempt is counted as a failure before it runs,
+// in the same step as the limit check, and a success clears it.
 func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip string, render func(msg string)) bool {
 	if banned, until := s.opts.Banner.Banned(ip); banned {
 		s.audit(r, "banned-attempt", "user", name)
@@ -37,16 +42,22 @@ func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip stri
 	for _, c := range []struct {
 		l   *auth.Limiter
 		key string
-	}{{s.pairLimit, ip + "|" + name}, {s.userLimit, name}, {s.ipLimit, ip}} {
+	}{{s.pairLimit, ip + "|" + name}, {s.ipLimit, ip}} {
 		if ok, wait := c.l.Allow(c.key); !ok {
 			w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
 			render(fmt.Sprintf("Too many attempts. Try again in %s.", wait.Round(time.Second)))
 			return true
 		}
 	}
-	if !s.acquire(ip, "u:"+name) {
+	if !s.acquire(ip) {
 		w.Header().Set("Retry-After", "2")
 		render("Too many attempts at once. Try again in a moment.")
+		return true
+	}
+	if ok, wait := s.userLimit.Take(name); !ok {
+		s.release(ip)
+		w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
+		render(fmt.Sprintf("Too many attempts. Try again in %s.", wait.Round(time.Second)))
 		return true
 	}
 	return false
@@ -56,8 +67,7 @@ func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip stri
 // if enabled, the account lock.
 func (s *Server) failed(r *http.Request, name, ip string, userID uint64, event string) {
 	s.pairLimit.Fail(ip + "|" + name)
-	s.userLimit.Fail(name)
-	s.ipLimit.Fail(ip)
+	s.ipLimit.Fail(ip) // userLimit counted this already, in throttled
 	if s.opts.Banner.Fail(ip) {
 		s.audit(r, "ip-banned", "user", name)
 	}
@@ -93,6 +103,7 @@ func (s *Server) failed(r *http.Request, name, ip string, userID uint64, event s
 
 func (s *Server) succeeded(name, ip string, userID uint64) {
 	s.pairLimit.Succeed(ip + "|" + name)
+	s.userLimit.Succeed(name)
 	s.lockMu.Lock()
 	delete(s.failures, userID)
 	s.lockMu.Unlock()
@@ -137,7 +148,7 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 	}) {
 		return
 	}
-	defer s.release(ip, "u:"+name)
+	defer s.release(ip)
 
 	u, err := s.store.UserByName(name)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -228,7 +239,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	}) {
 		return
 	}
-	defer s.release(ip, "u:"+name)
+	defer s.release(ip)
 
 	// Reserve this attempt before checking the code, in one transaction, so
 	// parallel guesses can't all slip in under the cap.

@@ -335,6 +335,19 @@ func TestLoginHandoffAndSidebar(t *testing.T) {
 }
 
 // A deep link into an app survives the trip through login, query and all.
+// A code evicted by other sign-ins restarts the flow once instead of failing.
+func TestCallbackRetriesMissingCode(t *testing.T) {
+	e := newEnv(t)
+	b := e.browser()
+	rr := b.request("GET", portalBase+pathCallback+"?code=gone", nil, nil)
+	if rr.Code != http.StatusFound || !strings.HasPrefix(rr.Header().Get("Location"), pathAuthStart+"?retry=1") {
+		t.Errorf("missing code: %d %q", rr.Code, rr.Header().Get("Location"))
+	}
+	if rr := b.request("GET", portalBase+pathCallback+"?code=gone&retry=1", nil, nil); rr.Code != http.StatusBadRequest {
+		t.Errorf("missing code on retry = %d", rr.Code)
+	}
+}
+
 func TestDeepLinkSurvivesLogin(t *testing.T) {
 	e := newEnv(t)
 	e.user("bob", false, "users")
@@ -1108,10 +1121,16 @@ func TestInFlightCap(t *testing.T) {
 	if len(e.s.inFlight) != 0 {
 		t.Errorf("leaked slots: %v", e.s.inFlight)
 	}
-	// A whole login releases its slots.
+	// Logins use per-address slots only, so a busy address elsewhere never
+	// blocks a user's own login; and a login releases its slot.
+	e.s.acquire("9.9.9.9")
+	e.s.acquire("9.9.9.9")
+	defer func() { e.s.release("9.9.9.9"); e.s.release("9.9.9.9") }()
 	e.user("bob", false)
-	e.browser().login("bob", "password-for-bob")
-	if len(e.s.inFlight) != 0 {
+	if rr := e.browser().login("bob", "password-for-bob"); rr.Code != http.StatusOK {
+		t.Fatalf("login while another address is busy = %d", rr.Code)
+	}
+	if len(e.s.inFlight) != 1 {
 		t.Errorf("login leaked slots: %v", e.s.inFlight)
 	}
 }

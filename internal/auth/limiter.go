@@ -48,10 +48,30 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// Take checks and counts an attempt in one step: if key may proceed, the
+// attempt is recorded as a failure up front (call Succeed to clear it).
+// Counting before the check closes the gap a parallel burst would
+// otherwise slip through between Allow and Fail.
+func (l *Limiter) Take(key string) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e := l.entries[key]; e != nil {
+		if wait := e.until.Sub(l.Now()); wait > 0 {
+			return false, wait
+		}
+	}
+	l.failLocked(key)
+	return true, 0
+}
+
 // Fail records a failed attempt for key.
 func (l *Limiter) Fail(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.failLocked(key)
+}
+
+func (l *Limiter) failLocked(key string) {
 	now := l.Now()
 	if l.entries == nil {
 		l.entries = make(map[string]*limitEntry)

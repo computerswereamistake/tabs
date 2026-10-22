@@ -277,6 +277,24 @@ func TestSecretBox(t *testing.T) {
 	}
 }
 
+func TestLimiterTake(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := &Limiter{Free: 2, Base: time.Second, Max: time.Minute, Now: func() time.Time { return now }}
+	for i := range 3 {
+		if ok, _ := l.Take("bob"); !ok {
+			t.Fatalf("take %d refused", i)
+		}
+	}
+	// Three attempts counted before any finished: the next one waits.
+	if ok, wait := l.Take("bob"); ok || wait != time.Second {
+		t.Fatalf("4th take: ok=%v wait=%v", ok, wait)
+	}
+	l.Succeed("bob")
+	if ok, _ := l.Take("bob"); !ok {
+		t.Error("success didn't clear the provisional failures")
+	}
+}
+
 func TestBanner(t *testing.T) {
 	now := time.Unix(0, 0)
 	b := NewBanner(3, time.Minute, time.Hour)

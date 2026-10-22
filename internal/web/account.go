@@ -382,7 +382,7 @@ func (s *Server) checkCurrentPassword(w http.ResponseWriter, r *http.Request, a 
 	if s.throttled(w, r, a.user.Username, ip, func(msg string) { show(http.StatusTooManyRequests, a, msg, "") }) {
 		return false
 	}
-	defer s.release(ip, "u:"+a.user.Username)
+	defer s.release(ip)
 	ok, err := auth.VerifyPassword(a.user.PasswordHash, r.PostFormValue("current"))
 	if errors.Is(err, auth.ErrBusy) {
 		http.Error(w, "busy; try again in a moment", http.StatusServiceUnavailable)
@@ -393,6 +393,7 @@ func (s *Server) checkCurrentPassword(w http.ResponseWriter, r *http.Request, a 
 		show(http.StatusUnauthorized, a, "Your current password is wrong.", "")
 		return false
 	}
+	s.userLimit.Succeed(a.user.Username)
 	return true
 }
 

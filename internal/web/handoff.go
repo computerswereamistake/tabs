@@ -94,7 +94,11 @@ func (s *Server) serveHandoff(w http.ResponseWriter, r *http.Request, st *state)
 		return
 	}
 	// Built from configured values only; host was checked against them.
-	http.Redirect(w, r, s.scheme()+"://"+host+pathCallback+"?code="+url.QueryEscape(tok), http.StatusFound)
+	cb := s.scheme() + "://" + host + pathCallback + "?code=" + url.QueryEscape(tok)
+	if q.Get("retry") == "1" {
+		cb += "&retry=1"
+	}
+	http.Redirect(w, r, cb, http.StatusFound)
 }
 
 // serveCallback swaps a code for a gate cookie on host.
@@ -106,6 +110,12 @@ func (s *Server) serveCallback(w http.ResponseWriter, r *http.Request, st *state
 	}
 	now := s.opts.Now()
 	c, err := s.store.ConsumeCode(auth.HashToken(code), now)
+	if err != nil && r.URL.Query().Get("retry") != "1" {
+		// The code may have been pushed out by other sign-ins (the cap
+		// drops the oldest); start over once rather than fail.
+		http.Redirect(w, r, pathAuthStart+"?retry=1&rd=/", http.StatusFound)
+		return
+	}
 	if err != nil || c.Host != host {
 		s.message(w, r, http.StatusBadRequest, "Sign-in expired", "That sign-in link has expired. Go back to the app and try again.")
 		return

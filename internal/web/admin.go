@@ -284,7 +284,13 @@ func (s *Server) loadAdminUser(c *adminCtx, res result) (any, error) {
 // sends them to their account page if they are no longer a full admin.
 func (s *Server) updateTarget(c *adminCtx, event string, fn func(u *store.User) error) (result, bool) {
 	before := c.target
-	u, err := s.store.UpdateUser(c.target.ID, fn)
+	// The acting admin is re-checked in the same transaction, so a change
+	// can't land after their session ended or they were demoted.
+	u, err := s.store.UpdateUserAs(store.Actor{SessionID: c.a.sess.ID, Admin: true}, c.target.ID, fn)
+	if errors.Is(err, store.ErrStaleSession) {
+		http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
+		return handled, false
+	}
 	if err != nil {
 		return refuse(http.StatusBadRequest, userError(err)), false
 	}

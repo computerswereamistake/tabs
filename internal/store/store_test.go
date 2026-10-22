@@ -456,17 +456,23 @@ func TestTouchSessions(t *testing.T) {
 	}
 }
 
-func TestOneGatePerSessionAndHost(t *testing.T) {
+func TestGatesPerSessionAndHostBounded(t *testing.T) {
 	s := open(t)
 	u := mustUser(t, s, "alice", false)
 	_ = s.CreateSession(Session{ID: "s", Hash: "h", UserID: u.ID, AuthEpoch: u.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
-	_ = s.CreateGate(Gate{Hash: "g1", SessionID: "s", Host: "a.example.com"})
-	_ = s.CreateGate(Gate{Hash: "g2", SessionID: "s", Host: "b.example.com"})
-	_ = s.CreateGate(Gate{Hash: "g3", SessionID: "s", Host: "a.example.com"})
-	if _, _, _, err := s.GateSession("g1", now, time.Hour); err == nil {
-		t.Error("replaced gate still works")
+	_ = s.CreateGate(Gate{Hash: "g1", SessionID: "s", Host: "a.example.com", CreatedAt: now})
+	_ = s.CreateGate(Gate{Hash: "g2", SessionID: "s", Host: "b.example.com", CreatedAt: now})
+	// Two racing handoffs on a.example.com: both gates stay valid.
+	_ = s.CreateGate(Gate{Hash: "g3", SessionID: "s", Host: "a.example.com", CreatedAt: now.Add(time.Second)})
+	if _, _, _, err := s.GateSession("g1", now, time.Hour); err != nil {
+		t.Error("the gate a racing handoff replaced stopped working")
 	}
-	for _, g := range []string{"g2", "g3"} {
+	// A third drops the oldest.
+	_ = s.CreateGate(Gate{Hash: "g4", SessionID: "s", Host: "a.example.com", CreatedAt: now.Add(2 * time.Second)})
+	if _, _, _, err := s.GateSession("g1", now, time.Hour); err == nil {
+		t.Error("oldest gate kept past the bound")
+	}
+	for _, g := range []string{"g2", "g3", "g4"} {
 		if _, _, _, err := s.GateSession(g, now, time.Hour); err != nil {
 			t.Errorf("gate %s: %v", g, err)
 		}
@@ -487,5 +493,31 @@ func TestBackup(t *testing.T) {
 	defer b.Close()
 	if u, err := b.UserByName("alice"); err != nil || !u.Admin {
 		t.Errorf("backup missing data: %v", err)
+	}
+}
+
+func TestUpdateUserAsRechecksActor(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	admin := mustUser(t, s, "root", true)
+	_ = s.CreateSession(Session{ID: "s", Hash: "h", UserID: u.ID, AuthEpoch: u.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	_ = s.CreateSession(Session{ID: "a", Hash: "ha", UserID: admin.ID, AuthEpoch: admin.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	set := func(x *User) error { x.PasswordHash = "mine"; return nil }
+	if _, err := s.UpdateUserAs(Actor{SessionID: "s"}, u.ID, set); err != nil {
+		t.Fatalf("valid actor: %v", err)
+	}
+	// That change ended the session; a second in-flight change from it fails.
+	if _, err := s.UpdateUserAs(Actor{SessionID: "s"}, u.ID, set); !errors.Is(err, ErrStaleSession) {
+		t.Errorf("stale actor: %v", err)
+	}
+	// A demoted admin's session can't make admin changes.
+	if _, err := s.UpdateUserAs(Actor{SessionID: "a", Admin: true}, u.ID, func(x *User) error { x.Name = "x"; return nil }); err != nil {
+		t.Fatalf("admin actor: %v", err)
+	}
+	b := mustUser(t, s, "bob", true)
+	_, _ = s.UpdateUser(admin.ID, func(x *User) error { x.Admin = false; return nil }) // ends session "a" too
+	_ = b
+	if _, err := s.UpdateUserAs(Actor{SessionID: "a", Admin: true}, u.ID, func(x *User) error { x.Name = "y"; return nil }); !errors.Is(err, ErrStaleSession) {
+		t.Errorf("demoted admin: %v", err)
 	}
 }

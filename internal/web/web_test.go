@@ -1221,3 +1221,29 @@ func TestVerifyDoesNotWrite(t *testing.T) {
 		t.Errorf("after flush LastSeen = %v, want %v", ss[0].LastSeen, e.now)
 	}
 }
+
+// Activity that's only in memory (not flushed yet) still keeps a session
+// from idling out.
+func TestIdleCountsUnflushedActivity(t *testing.T) {
+	e := newEnv(t) // idle timeout 24h
+	e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	if err := e.s.FlushSeen(); err != nil {
+		t.Fatal(err)
+	}
+	e.now = e.now.Add(23 * time.Hour)
+	if rr := b.verify("alpha", "tabs.example.com", nil); rr.Code != http.StatusOK {
+		t.Fatalf("at 23h = %d", rr.Code)
+	}
+	// Stored LastSeen is now 25h old, but the last use was 2h ago.
+	e.now = e.now.Add(2 * time.Hour)
+	if rr := b.verify("alpha", "tabs.example.com", nil); rr.Code != http.StatusOK {
+		t.Errorf("active session idled out before a flush: %d", rr.Code)
+	}
+	// Truly idle sessions still end.
+	e.now = e.now.Add(25 * time.Hour)
+	if rr := b.verify("alpha", "tabs.example.com", nil); rr.Code == http.StatusOK {
+		t.Error("idle session still valid")
+	}
+}

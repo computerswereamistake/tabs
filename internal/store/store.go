@@ -375,8 +375,48 @@ func (s *Store) Users() ([]User, error) {
 // user's AuthEpoch goes up, which ends every existing session. Errors from
 // fn abort the update.
 func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
+	return s.UpdateUserAs(Actor{}, id, fn)
+}
+
+// Actor is who is making a change, for UpdateUserAs. The zero Actor (the
+// system: CLI commands, lockouts, login bookkeeping) skips the checks.
+type Actor struct {
+	SessionID string // the acting session
+	Admin     bool   // the actor must still be an admin
+}
+
+// ErrStaleSession means the acting session ended, or its user's
+// credentials or privileges changed, while the request was in flight.
+var ErrStaleSession = errors.New("session no longer valid")
+
+// actorOKTx checks, inside the write transaction, that the acting session
+// still exists and still matches its user (same AuthEpoch, enabled, and an
+// admin if required). Password hashing happens before the transaction,
+// so without this a change racing a revocation or a reset could land
+// after it and undo it.
+func actorOKTx(tx *bolt.Tx, a Actor) error {
+	if a.SessionID == "" {
+		return nil
+	}
+	sess, err := get[Session](tx.Bucket(bSessions), []byte(a.SessionID))
+	if err != nil {
+		return ErrStaleSession
+	}
+	u, err := get[User](tx.Bucket(bUsers), idKey(sess.UserID))
+	if err != nil || u.Disabled || u.AuthEpoch != sess.AuthEpoch || (a.Admin && !u.Admin) {
+		return ErrStaleSession
+	}
+	return nil
+}
+
+// UpdateUserAs is UpdateUser on behalf of a, which is re-checked in the
+// same transaction (see actorOKTx).
+func (s *Store) UpdateUserAs(a Actor, id uint64, fn func(u *User) error) (User, error) {
 	var out User
 	err := s.db.Update(func(tx *bolt.Tx) error {
+		if err := actorOKTx(tx, a); err != nil {
+			return err
+		}
 		users := tx.Bucket(bUsers)
 		u, err := get[User](users, idKey(id))
 		if err != nil {
@@ -782,7 +822,9 @@ func liveSessionTx(tx *bolt.Tx, id []byte, now time.Time, idle time.Duration) (S
 	if err != nil {
 		return Session{}, User{}, ErrNotFound
 	}
-	if !now.Before(sess.ExpiresAt) || now.Sub(sess.LastSeen) > idle {
+	// idle <= 0 leaves the idle check to the caller, which may know of
+	// activity that isn't stored yet.
+	if !now.Before(sess.ExpiresAt) || (idle > 0 && now.Sub(sess.LastSeen) > idle) {
 		return Session{}, User{}, ErrNotFound
 	}
 	u, err := get[User](tx.Bucket(bUsers), idKey(sess.UserID))
@@ -1015,15 +1057,33 @@ func (s *Store) ConsumeCode(hash string, now time.Time) (Code, error) {
 }
 
 // CreateGate stores a gate for an existing session.
-// CreateGate stores a gate for an existing session, replacing any earlier
-// gate the session had on the same host: one gate per session per host.
+// maxGatesPerHost bounds a session's gates on one host. Two, not one: when
+// two handoffs race, the browser may end up keeping either cookie.
+const maxGatesPerHost = 2
+
+// CreateGate stores a gate for an existing session, dropping that
+// session's oldest gates on the same host beyond maxGatesPerHost.
 func (s *Store) CreateGate(g Gate) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bSessions).Get([]byte(g.SessionID)) == nil {
 			return ErrNotFound
 		}
-		if err := deleteWhereTx(tx, bGates, func(o Gate) bool { return o.SessionID == g.SessionID && o.Host == g.Host }); err != nil {
+		gates, err := all[Gate](tx.Bucket(bGates))
+		if err != nil {
 			return err
+		}
+		var same []Gate
+		for _, o := range gates {
+			if o.SessionID == g.SessionID && o.Host == g.Host {
+				same = append(same, o)
+			}
+		}
+		slices.SortFunc(same, func(a, b Gate) int { return a.CreatedAt.Compare(b.CreatedAt) })
+		for len(same) >= maxGatesPerHost {
+			if err := tx.Bucket(bGates).Delete([]byte(same[0].Hash)); err != nil {
+				return err
+			}
+			same = same[1:]
 		}
 		return put(tx.Bucket(bGates), []byte(g.Hash), g)
 	})

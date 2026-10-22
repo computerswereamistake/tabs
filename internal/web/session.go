@@ -124,8 +124,8 @@ func (s *Server) loadAuth(r *http.Request) *authed {
 		return nil
 	}
 	now := s.opts.Now()
-	sess, u, err := s.store.SessionByToken(auth.HashToken(tok), now, s.opts.SessionIdle)
-	if err != nil {
+	sess, u, err := s.store.SessionByToken(auth.HashToken(tok), now, 0)
+	if err != nil || !s.idleOK(sess, now) {
 		return nil
 	}
 	a := &authed{sess: sess, user: u, state: s.effective(sess, u)}
@@ -135,6 +135,19 @@ func (s *Server) loadAuth(r *http.Request) *authed {
 	setLogUser(r, u.Username)
 	s.touch(sess.ID, now)
 	return a
+}
+
+// idleOK applies the idle timeout using the latest activity, counting
+// what's only in memory so far (see touch); the store checks the absolute
+// lifetime.
+func (s *Server) idleOK(sess store.Session, now time.Time) bool {
+	last := sess.LastSeen
+	s.seenMu.Lock()
+	if t := s.seen[sess.ID]; t.After(last) {
+		last = t
+	}
+	s.seenMu.Unlock()
+	return now.Sub(last) <= s.opts.SessionIdle
 }
 
 // newSession creates a session for u and sets the auth cookie.
@@ -215,8 +228,9 @@ func (s *Server) loadGate(r *http.Request, host string) *gated {
 }
 
 func (s *Server) gateFromToken(tok, host string) *gated {
-	g, sess, u, err := s.store.GateSession(auth.HashToken(tok), s.opts.Now(), s.opts.SessionIdle)
-	if err != nil || g.Host != host {
+	now := s.opts.Now()
+	g, sess, u, err := s.store.GateSession(auth.HashToken(tok), now, 0)
+	if err != nil || g.Host != host || !s.idleOK(sess, now) {
 		return nil
 	}
 	return &gated{gate: g, sess: sess, user: u, state: s.effective(sess, u)}

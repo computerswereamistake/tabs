@@ -324,7 +324,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		})
 		return
 	}
-	sess, _, err := s.store.SessionByID(a.sess.ID, s.opts.Now(), s.opts.SessionIdle)
+	sess, _, err := s.store.SessionByID(a.sess.ID, s.opts.Now(), 0)
 	if err == nil {
 		if st := s.effective(sess, u); st != effFull {
 			s.sendToState(w, r, &authed{sess: sess, user: u, state: st}, next)

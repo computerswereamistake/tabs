@@ -131,8 +131,8 @@ func (s *Server) serveCallback(w http.ResponseWriter, r *http.Request, st *state
 		s.message(w, r, http.StatusBadRequest, "Sign-in failed", "This browser didn't start that sign-in. Go back to the app and try again.")
 		return
 	}
-	sess, u, err := s.store.SessionByID(c.SessionID, now, s.opts.SessionIdle)
-	if err != nil || s.effective(sess, u) != effFull {
+	sess, u, err := s.store.SessionByID(c.SessionID, now, 0)
+	if err != nil || !s.idleOK(sess, now) || s.effective(sess, u) != effFull {
 		http.Redirect(w, r, pathAuthStart+"?rd="+url.QueryEscape(c.Rd), http.StatusFound)
 		return
 	}

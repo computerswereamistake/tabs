@@ -180,12 +180,14 @@ func (s *Server) runAccountAction(c *accountCtx) result {
 // apps as Remote-Email and some match accounts on it, so only admins set it.
 func (s *Server) accountProfile(c *accountCtx) result {
 	name, err := store.CleanName(c.r.PostFormValue("name"))
-	if err == nil {
-		c.a.user, err = s.store.UpdateUser(c.a.user.ID, func(u *store.User) error { u.Name = name; return nil })
-	}
 	if err != nil {
 		return refuse(http.StatusBadRequest, userError(err))
 	}
+	u, res, ok := s.updateSelf(c, func(u *store.User) error { u.Name = name; return nil })
+	if !ok {
+		return res
+	}
+	c.a.user = u
 	return done("Saved.")
 }
 
@@ -204,12 +206,12 @@ func (s *Server) accountPassword(c *accountCtx) result {
 	if err != nil {
 		return s.failResult(c.w, c.r, err)
 	}
-	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+	u, res, ok := s.updateSelf(c, func(u *store.User) error {
 		u.PasswordHash, u.MustChangePassword = hash, false
 		return nil
 	})
-	if err != nil {
-		return s.failResult(c.w, c.r, err)
+	if !ok {
+		return res
 	}
 	s.audit(c.r, "password-changed", "user", u.Username)
 	was := c.a.state
@@ -268,15 +270,15 @@ func (s *Server) accountTOTPConfirm(c *accountCtx) result {
 		return s.failResult(c.w, c.r, err)
 	}
 	pending := c.a.sess.PendingTOTP
-	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+	u, res, ok := s.updateSelf(c, func(u *store.User) error {
 		if u.HasTOTP() {
 			return errors.New("already enrolled")
 		}
 		u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = pending, step, hashes
 		return nil
 	})
-	if err != nil {
-		return s.failResult(c.w, c.r, err)
+	if !ok {
+		return res
 	}
 	s.audit(c.r, "totp-enrolled", "user", u.Username)
 	if !s.reissueFor(c, u) {
@@ -299,12 +301,12 @@ func (s *Server) accountTOTPDisable(c *accountCtx) result {
 	if res, ok := s.recheckCode(c); !ok {
 		return res
 	}
-	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+	u, res, ok := s.updateSelf(c, func(u *store.User) error {
 		u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = "", 0, nil
 		return nil
 	})
-	if err != nil {
-		return s.failResult(c.w, c.r, err)
+	if !ok {
+		return res
 	}
 	s.audit(c.r, "totp-disabled", "user", u.Username)
 	if !s.reissueFor(c, u) {
@@ -329,9 +331,9 @@ func (s *Server) accountRecovery(c *accountCtx) result {
 	if err != nil {
 		return s.failResult(c.w, c.r, err)
 	}
-	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error { u.RecoveryHashes = hashes; return nil })
-	if err != nil {
-		return s.failResult(c.w, c.r, err)
+	u, res, ok := s.updateSelf(c, func(u *store.User) error { u.RecoveryHashes = hashes; return nil })
+	if !ok {
+		return res
 	}
 	s.audit(c.r, "recovery-codes-regenerated", "user", u.Username)
 	if !s.reissueFor(c, u) {
@@ -365,6 +367,25 @@ func (s *Server) accountRevokeOthers(c *accountCtx) result {
 	}
 	s.audit(c.r, "sessions-revoked", "user", c.a.user.Username)
 	return done("Logged out everywhere else.")
+}
+
+// updateSelf applies fn to the request's own user, re-checking in the same
+// transaction that this session is still valid: a change that took a while
+// (password hashing) must not land after the session was revoked or the
+// password reset meanwhile.
+func (s *Server) updateSelf(c *accountCtx, fn func(u *store.User) error) (store.User, result, bool) {
+	u, err := s.store.UpdateUserAs(store.Actor{SessionID: c.a.sess.ID}, c.a.user.ID, fn)
+	switch {
+	case errors.Is(err, store.ErrStaleSession):
+		s.clearCookie(c.w, cookieAuth)
+		http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
+		return u, handled, false
+	case errors.Is(err, store.ErrInvalid):
+		return u, refuse(http.StatusBadRequest, userError(err)), false
+	case err != nil:
+		return u, s.failResult(c.w, c.r, err), false
+	}
+	return u, result{}, true
 }
 
 // reissue gives the acting user a fresh full session after a change that

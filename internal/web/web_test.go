@@ -246,7 +246,7 @@ func (e *env) totpCode(u store.User, at time.Time) string {
 func (b *browser) enrol(u store.User) []string {
 	b.e.t.Helper()
 	b.follow("GET", authBase+pathAccount, nil)
-	b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"totp-begin"}}, nil)
+	b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"totp-begin"}, "current": {"password-for-" + u.Username}}, nil)
 	m := regexp.MustCompile(`<code class="secret">([^<]+)</code>`).FindStringSubmatch(b.last.Body.String())
 	if m == nil {
 		b.e.t.Fatalf("no secret shown:\n%s", b.last.Body.String())
@@ -623,6 +623,18 @@ func TestTOTPLogin(t *testing.T) {
 	f.login("bob", "password-for-bob")
 	if rr := f.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {f.csrf()}, "code": {recovery[0]}}, nil); rr.Code != http.StatusUnauthorized {
 		t.Errorf("reused recovery code = %d", rr.Code)
+	}
+}
+
+func TestVoluntaryEnrolNeedsPassword(t *testing.T) {
+	e := newEnv(t)
+	e.user("bob", false)
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.follow("GET", authBase+pathAccount, nil)
+	rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"totp-begin"}}, nil)
+	if rr.Code != http.StatusUnauthorized || strings.Contains(rr.Body.String(), `class="secret"`) {
+		t.Errorf("enrolment without the password: %d", rr.Code)
 	}
 }
 

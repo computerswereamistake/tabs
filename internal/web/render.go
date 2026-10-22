@@ -107,6 +107,42 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 	}
 }
 
+// result is what a form action wants shown next, on the same page.
+type result struct {
+	status  int    // 0 means 200
+	err     string // shown in a red box
+	notice  string // shown in a green box
+	link    string // a one-time link to show (admin pages)
+	linkFor string // whose link it is
+	written bool   // the action already answered (redirect, 500, ...)
+}
+
+// done is a successful action with an optional notice.
+func done(notice string) result { return result{notice: notice} }
+
+// refuse is a failed action, shown with its message.
+func refuse(status int, msg string) result { return result{status: status, err: msg} }
+
+// handled means the action wrote the response itself.
+var handled = result{written: true}
+
+// failResult logs an unexpected error, answers 500 and returns handled.
+func (s *Server) failResult(w http.ResponseWriter, r *http.Request, err error) result {
+	s.fail(w, r, err)
+	return handled
+}
+
+// showForm renders a form page with the outcome of the last action.
+func (s *Server) showForm(w http.ResponseWriter, r *http.Request, a *authed, name, heading string, res result, data any) {
+	p := s.newPage(heading, a, data)
+	p.Error, p.Notice = res.err, res.notice
+	status := res.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	s.render(w, r, status, name, p)
+}
+
 // messageData is a line of text and an optional link onward.
 type messageData struct {
 	Text, Link, LinkText string

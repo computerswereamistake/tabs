@@ -118,236 +118,253 @@ func (s *Server) serveAccount(w http.ResponseWriter, r *http.Request, st *state)
 		}
 		return
 	}
-	show := func(status int, a *authed, errMsg, notice string) {
-		p, err := s.accountPage(a, next)
-		if err != nil {
-			s.fail(w, r, err)
+	c := &accountCtx{w: w, r: r, a: a, next: next}
+	var res result
+	if r.Method == http.MethodPost {
+		if !s.checkPost(w, r, a) {
 			return
 		}
-		p.Error, p.Notice = errMsg, notice
-		s.render(w, r, status, "account", p)
+		c.next = authNext(r.PostFormValue("next"))
+		if res = s.runAccountAction(c); res.written {
+			return
+		}
 	}
-	if r.Method != http.MethodPost {
-		show(http.StatusOK, a, "", "")
+	p, err := s.accountPage(c.a, c.next)
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
-	if !s.checkPost(w, r, a) {
-		return
+	s.showForm(w, r, c.a, "account", p.Heading, res, p.Data)
+}
+
+// accountCtx is one account-page request. Actions that reissue the
+// session (after a change that ended it) replace a.
+type accountCtx struct {
+	w    http.ResponseWriter
+	r    *http.Request
+	a    *authed
+	next string
+}
+
+// accountAction is one form on the account page. Every action is allowed
+// in a full session; a limited one (must change password, must enrol) may
+// only use the actions that clear it.
+type accountAction struct {
+	alsoIn []effState
+	run    func(s *Server, c *accountCtx) result
+}
+
+var accountActions = map[string]accountAction{
+	"profile":       {run: (*Server).accountProfile},
+	"password":      {alsoIn: []effState{effMustChangePW}, run: (*Server).accountPassword},
+	"totp-begin":    {alsoIn: []effState{effMustEnrol}, run: (*Server).accountTOTPBegin},
+	"totp-confirm":  {alsoIn: []effState{effMustEnrol}, run: (*Server).accountTOTPConfirm},
+	"totp-disable":  {run: (*Server).accountTOTPDisable},
+	"recovery":      {run: (*Server).accountRecovery},
+	"revoke":        {run: (*Server).accountRevoke},
+	"revoke-others": {run: (*Server).accountRevokeOthers},
+}
+
+func (s *Server) runAccountAction(c *accountCtx) result {
+	act, ok := accountActions[c.r.PostFormValue("action")]
+	if !ok {
+		return refuse(http.StatusBadRequest, "Unknown action.")
 	}
-	next = authNext(r.PostFormValue("next"))
-	action := r.PostFormValue("action")
-	// Each limited state may do only what clears it.
-	allowed := map[effState][]string{
-		effMustChangePW: {"password"},
-		effMustEnrol:    {"totp-begin", "totp-confirm"},
+	if c.a.state != effFull && !slices.Contains(act.alsoIn, c.a.state) {
+		return refuse(http.StatusForbidden, "Finish this step first.")
 	}
-	if list, limited := allowed[a.state]; limited && !slices.Contains(list, action) {
-		show(http.StatusForbidden, a, "Finish this step first.", "")
-		return
+	return act.run(s, c)
+}
+
+// accountProfile changes the display name. Not the email: it's sent to
+// apps as Remote-Email and some match accounts on it, so only admins set it.
+func (s *Server) accountProfile(c *accountCtx) result {
+	name, err := store.CleanName(c.r.PostFormValue("name"))
+	if err == nil {
+		c.a.user, err = s.store.UpdateUser(c.a.user.ID, func(u *store.User) error { u.Name = name; return nil })
 	}
+	if err != nil {
+		return refuse(http.StatusBadRequest, userError(err))
+	}
+	return done("Saved.")
+}
 
-	switch action {
-	case "profile":
-		// Only the display name: the email is sent to apps as Remote-Email
-		// and some match accounts on it, so only admins set it.
-		name, err := store.CleanName(r.PostFormValue("name"))
-		if err == nil {
-			_, err = s.store.UpdateUser(a.user.ID, func(u *store.User) error { u.Name = name; return nil })
-		}
-		if err != nil {
-			show(http.StatusBadRequest, a, userError(err), "")
-			return
-		}
-		a.user, _ = s.store.UserByID(a.user.ID)
-		show(http.StatusOK, a, "", "Saved.")
+func (s *Server) accountPassword(c *accountCtx) result {
+	if res, ok := s.recheckPassword(c); !ok {
+		return res
+	}
+	pw := c.r.PostFormValue("new")
+	if pw != c.r.PostFormValue("confirm") {
+		return refuse(http.StatusBadRequest, "The new passwords don't match.")
+	}
+	if err := auth.CheckPassword(pw, c.a.user.Username); err != nil {
+		return refuse(http.StatusBadRequest, userError(err))
+	}
+	hash, err := auth.HashPassword(pw)
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+		u.PasswordHash, u.MustChangePassword = hash, false
+		return nil
+	})
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	s.audit(c.r, "password-changed", "user", u.Username)
+	was := c.a.state
+	if !s.reissueFor(c, u) {
+		return handled
+	}
+	// Changing a temporary password clears the way; carry on to wherever
+	// the login was going.
+	if c.a.state == effFull && (was != effFull || c.next != "") {
+		s.redirectNext(c.w, c.r, c.next)
+		return handled
+	}
+	return done("Password changed. You've been logged out everywhere else.")
+}
 
-	case "password":
-		if !s.checkCurrentPassword(w, r, a, show) {
-			return
-		}
-		pw := r.PostFormValue("new")
-		if pw != r.PostFormValue("confirm") {
-			show(http.StatusBadRequest, a, "The new passwords don't match.", "")
-			return
-		}
-		if err := auth.CheckPassword(pw, a.user.Username); err != nil {
-			show(http.StatusBadRequest, a, userError(err), "")
-			return
-		}
-		hash, err := auth.HashPassword(pw)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		u, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
-			u.PasswordHash, u.MustChangePassword = hash, false
-			return nil
-		})
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		s.audit(r, "password-changed", "user", u.Username)
-		na, ok := s.reissue(w, r, u)
-		if !ok {
-			return
-		}
-		if na.state == effFull && (a.state != effFull || next != "") {
-			s.redirectNext(w, r, next)
-			return
-		}
-		show(http.StatusOK, na, "", "Password changed. You've been logged out everywhere else.")
+func (s *Server) accountTOTPBegin(c *accountCtx) result {
+	if c.a.user.HasTOTP() {
+		return refuse(http.StatusBadRequest, "Two-factor login is already set up.")
+	}
+	// Re-check the password, so a hijacked session can't bind its own
+	// authenticator and lock the owner out. This applies to forced
+	// enrolment too: a group can start requiring TOTP long after the
+	// session logged in.
+	if res, ok := s.recheckPassword(c); !ok {
+		return res
+	}
+	secret, err := auth.NewTOTPSecret()
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	sealed, err := s.opts.Box.Seal(c.a.user.ID, secret)
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	if err := s.store.UpdateSession(c.a.sess.ID, func(x *store.Session) bool { x.PendingTOTP = sealed; return true }); err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	c.a.sess.PendingTOTP = sealed
+	return result{}
+}
 
-	case "totp-begin":
-		if a.user.HasTOTP() {
-			show(http.StatusBadRequest, a, "Two-factor login is already set up.", "")
-			return
+func (s *Server) accountTOTPConfirm(c *accountCtx) result {
+	if c.a.sess.PendingTOTP == "" || c.a.user.HasTOTP() {
+		return refuse(http.StatusBadRequest, "Start setting up two-factor login first.")
+	}
+	secret, err := s.opts.Box.Open(c.a.user.ID, c.a.sess.PendingTOTP)
+	if err != nil {
+		return refuse(http.StatusBadRequest, "Start setting up two-factor login again.")
+	}
+	step, ok := auth.VerifyTOTP(secret, c.r.PostFormValue("code"), s.opts.Now(), 0)
+	if !ok {
+		return refuse(http.StatusBadRequest, "That code didn't match. Check the time on your device and try again.")
+	}
+	codes, hashes, err := auth.NewRecoveryCodes()
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	pending := c.a.sess.PendingTOTP
+	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+		if u.HasTOTP() {
+			return errors.New("already enrolled")
 		}
-		// Re-check the password, so a hijacked session can't bind its own
-		// authenticator and lock the owner out. This applies to forced
-		// enrolment too: a group can start requiring TOTP long after the
-		// session logged in.
-		if !s.checkCurrentPassword(w, r, a, show) {
-			return
-		}
-		secret, err := auth.NewTOTPSecret()
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		sealed, err := s.opts.Box.Seal(a.user.ID, secret)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		if err := s.store.UpdateSession(a.sess.ID, func(x *store.Session) bool { x.PendingTOTP = sealed; return true }); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		a.sess.PendingTOTP = sealed
-		show(http.StatusOK, a, "", "")
+		u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = pending, step, hashes
+		return nil
+	})
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	s.audit(c.r, "totp-enrolled", "user", u.Username)
+	if !s.reissueFor(c, u) {
+		return handled
+	}
+	s.showRecovery(c.w, c.r, c.a, codes, c.next, "Two-factor login is on. You've been logged out everywhere else.")
+	return handled
+}
 
-	case "totp-confirm":
-		if a.sess.PendingTOTP == "" || a.user.HasTOTP() {
-			show(http.StatusBadRequest, a, "Start setting up two-factor login first.", "")
-			return
-		}
-		secret, err := s.opts.Box.Open(a.user.ID, a.sess.PendingTOTP)
-		if err != nil {
-			show(http.StatusBadRequest, a, "Start setting up two-factor login again.", "")
-			return
-		}
-		step, ok := auth.VerifyTOTP(secret, r.PostFormValue("code"), s.opts.Now(), 0)
-		if !ok {
-			show(http.StatusBadRequest, a, "That code didn't match. Check the time on your device and try again.", "")
-			return
-		}
-		codes, hashes, err := auth.NewRecoveryCodes()
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		u, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
-			if u.HasTOTP() {
-				return errors.New("already enrolled")
+func (s *Server) accountTOTPDisable(c *accountCtx) result {
+	if !c.a.user.HasTOTP() {
+		return refuse(http.StatusBadRequest, "Two-factor login isn't set up.")
+	}
+	if s.requiresTOTP(c.a.user) {
+		return refuse(http.StatusForbidden, "One of your groups requires two-factor login, so it can't be turned off.")
+	}
+	if res, ok := s.recheckPassword(c); !ok {
+		return res
+	}
+	if res, ok := s.recheckCode(c); !ok {
+		return res
+	}
+	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+		u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = "", 0, nil
+		return nil
+	})
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	s.audit(c.r, "totp-disabled", "user", u.Username)
+	if !s.reissueFor(c, u) {
+		return handled
+	}
+	return done("Two-factor login is off.")
+}
+
+// accountRecovery makes new recovery codes. They bypass the authenticator
+// from then on, so it needs a current code as well as the password.
+func (s *Server) accountRecovery(c *accountCtx) result {
+	if !c.a.user.HasTOTP() {
+		return refuse(http.StatusBadRequest, "Two-factor login isn't set up.")
+	}
+	if res, ok := s.recheckPassword(c); !ok {
+		return res
+	}
+	if res, ok := s.recheckCode(c); !ok {
+		return res
+	}
+	codes, hashes, err := auth.NewRecoveryCodes()
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	u, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error { u.RecoveryHashes = hashes; return nil })
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	s.audit(c.r, "recovery-codes-regenerated", "user", u.Username)
+	if !s.reissueFor(c, u) {
+		return handled
+	}
+	s.showRecovery(c.w, c.r, c.a, codes, "", "New recovery codes made; the old ones no longer work.")
+	return handled
+}
+
+// accountRevoke ends one of the user's other sessions.
+func (s *Server) accountRevoke(c *accountCtx) result {
+	id := c.r.PostFormValue("session")
+	ss, err := s.store.UserSessions(c.a.user.ID)
+	if err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	for _, x := range ss {
+		if x.ID == id && id != c.a.sess.ID {
+			if err := s.store.DeleteSession(id); err != nil {
+				return s.failResult(c.w, c.r, err)
 			}
-			u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = a.sess.PendingTOTP, step, hashes
-			return nil
-		})
-		if err != nil {
-			s.fail(w, r, err)
-			return
+			s.audit(c.r, "session-revoked", "user", c.a.user.Username)
 		}
-		s.audit(r, "totp-enrolled", "user", u.Username)
-		na, ok := s.reissue(w, r, u)
-		if !ok {
-			return
-		}
-		s.showRecovery(w, r, na, codes, next, "Two-factor login is on. You've been logged out everywhere else.")
-
-	case "totp-disable":
-		if !a.user.HasTOTP() {
-			show(http.StatusBadRequest, a, "Two-factor login isn't set up.", "")
-			return
-		}
-		if s.requiresTOTP(a.user) {
-			show(http.StatusForbidden, a, "One of your groups requires two-factor login, so it can't be turned off.", "")
-			return
-		}
-		if !s.checkCurrentPassword(w, r, a, show) || !s.checkCurrentCode(w, r, a, show) {
-			return
-		}
-		u, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
-			u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = "", 0, nil
-			return nil
-		})
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		s.audit(r, "totp-disabled", "user", u.Username)
-		na, ok := s.reissue(w, r, u)
-		if !ok {
-			return
-		}
-		show(http.StatusOK, na, "", "Two-factor login is off.")
-
-	case "recovery":
-		if !a.user.HasTOTP() {
-			show(http.StatusBadRequest, a, "Two-factor login isn't set up.", "")
-			return
-		}
-		// New codes bypass the authenticator from then on, so prove you
-		// still have it.
-		if !s.checkCurrentPassword(w, r, a, show) || !s.checkCurrentCode(w, r, a, show) {
-			return
-		}
-		codes, hashes, err := auth.NewRecoveryCodes()
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		u, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error { u.RecoveryHashes = hashes; return nil })
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		s.audit(r, "recovery-codes-regenerated", "user", u.Username)
-		na, ok := s.reissue(w, r, u)
-		if !ok {
-			return
-		}
-		s.showRecovery(w, r, na, codes, "", "New recovery codes made; the old ones no longer work.")
-
-	case "revoke":
-		id := r.PostFormValue("session")
-		ss, err := s.store.UserSessions(a.user.ID)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		for _, x := range ss {
-			if x.ID == id && id != a.sess.ID {
-				if err := s.store.DeleteSession(id); err != nil {
-					s.fail(w, r, err)
-					return
-				}
-				s.audit(r, "session-revoked", "user", a.user.Username)
-			}
-		}
-		show(http.StatusOK, a, "", "Session ended.")
-
-	case "revoke-others":
-		if err := s.store.DeleteUserSessions(a.user.ID, a.sess.ID); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		s.audit(r, "sessions-revoked", "user", a.user.Username)
-		show(http.StatusOK, a, "", "Logged out everywhere else.")
-
-	default:
-		show(http.StatusBadRequest, a, "Unknown action.", "")
 	}
+	return done("Session ended.")
+}
+
+func (s *Server) accountRevokeOthers(c *accountCtx) result {
+	if err := s.store.DeleteUserSessions(c.a.user.ID, c.a.sess.ID); err != nil {
+		return s.failResult(c.w, c.r, err)
+	}
+	s.audit(c.r, "sessions-revoked", "user", c.a.user.Username)
+	return done("Logged out everywhere else.")
 }
 
 // reissue gives the acting user a fresh full session after a change that
@@ -361,14 +378,21 @@ func (s *Server) reissue(w http.ResponseWriter, r *http.Request, u store.User) (
 	return &authed{sess: sess, user: u, state: s.effective(sess, u)}, true
 }
 
+// reissueFor reissues the request's session for u and makes it current.
+func (s *Server) reissueFor(c *accountCtx, u store.User) bool {
+	na, ok := s.reissue(c.w, c.r, u)
+	if ok {
+		c.a = na
+	}
+	return ok
+}
+
 func (s *Server) showRecovery(w http.ResponseWriter, r *http.Request, a *authed, codes []string, next, notice string) {
 	link := pathAccount
 	if next = authNext(next); next != "" && a.state == effFull {
 		link = next
 	}
-	p := s.newPage("Recovery codes", a, recoveryData{Codes: codes, Next: link})
-	p.Notice = notice
-	s.render(w, r, http.StatusOK, "recovery", p)
+	s.showForm(w, r, a, "recovery", "Recovery codes", done(notice), recoveryData{Codes: codes, Next: link})
 }
 
 type recoveryData struct {
@@ -376,33 +400,37 @@ type recoveryData struct {
 	Next  string
 }
 
-// checkCurrentPassword re-checks the password before a security change,
-// counting failures like a login.
-func (s *Server) checkCurrentPassword(w http.ResponseWriter, r *http.Request, a *authed, show func(int, *authed, string, string)) bool {
-	ip := s.limitKey(r)
-	if s.throttled(w, r, a.user.Username, ip, func(msg string) { show(http.StatusTooManyRequests, a, msg, "") }) {
-		return false
+// recheckPassword re-checks the password before a security change,
+// throttled and counted like a login. On failure the result says what to
+// show (or that the response was written).
+func (s *Server) recheckPassword(c *accountCtx) (result, bool) {
+	ip := s.limitKey(c.r)
+	var msg string
+	if s.throttled(c.w, c.r, c.a.user.Username, ip, func(m string) { msg = m }) {
+		if msg == "" {
+			return handled, false // banned; throttled answered
+		}
+		return refuse(http.StatusTooManyRequests, msg), false
 	}
 	defer s.release(ip)
-	ok, err := auth.VerifyPassword(a.user.PasswordHash, r.PostFormValue("current"))
+	ok, err := auth.VerifyPassword(c.a.user.PasswordHash, c.r.PostFormValue("current"))
 	if errors.Is(err, auth.ErrBusy) {
-		http.Error(w, "busy; try again in a moment", http.StatusServiceUnavailable)
-		return false
+		http.Error(c.w, "busy; try again in a moment", http.StatusServiceUnavailable)
+		return handled, false
 	}
 	if !ok {
-		s.failed(r, a.user.Username, ip, 0, "reauth-failed")
-		show(http.StatusUnauthorized, a, "Your current password is wrong.", "")
-		return false
+		s.failed(c.r, c.a.user.Username, ip, 0, "reauth-failed")
+		return refuse(http.StatusUnauthorized, "Your current password is wrong."), false
 	}
-	s.userLimit.Succeed(a.user.Username)
-	return true
+	s.userLimit.Succeed(c.a.user.Username)
+	return result{}, true
 }
 
-// checkCurrentCode checks a TOTP or recovery code before a security change,
-// recording the step so it can't be replayed.
-func (s *Server) checkCurrentCode(w http.ResponseWriter, r *http.Request, a *authed, show func(int, *authed, string, string)) bool {
-	code := strings.ReplaceAll(strings.TrimSpace(r.PostFormValue("code")), " ", "")
-	_, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
+// recheckCode checks a current TOTP code before a security change,
+// recording its step so it can't be replayed.
+func (s *Server) recheckCode(c *accountCtx) (result, bool) {
+	code := strings.ReplaceAll(strings.TrimSpace(c.r.PostFormValue("code")), " ", "")
+	_, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
 		secret, err := s.opts.Box.Open(u.ID, u.TOTPSecret)
 		if err != nil {
 			return err
@@ -415,15 +443,13 @@ func (s *Server) checkCurrentCode(w http.ResponseWriter, r *http.Request, a *aut
 		return nil
 	})
 	if errors.Is(err, errBadCode) {
-		s.failed(r, a.user.Username, s.limitKey(r), 0, "reauth-totp-failed")
-		show(http.StatusUnauthorized, a, "That code didn't work.", "")
-		return false
+		s.failed(c.r, c.a.user.Username, s.limitKey(c.r), 0, "reauth-totp-failed")
+		return refuse(http.StatusUnauthorized, "That code didn't work."), false
 	}
 	if err != nil {
-		s.fail(w, r, err)
-		return false
+		return s.failResult(c.w, c.r, err), false
 	}
-	return true
+	return result{}, true
 }
 
 // userError turns a validation error into text for the page. Only errors

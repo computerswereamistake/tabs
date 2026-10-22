@@ -115,9 +115,7 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 	}
 	next := authNext(r.FormValue("next"))
 	show := func(status int, msg, username string) {
-		p := s.newPage("Log in", nil, loginData{Next: next, Username: username})
-		p.Error = msg
-		s.render(w, r, status, "login", p)
+		s.showForm(w, r, nil, "login", "Log in", refuse(status, msg), loginData{Next: next, Username: username})
 	}
 	if r.Method != http.MethodPost {
 		if a := s.loadAuth(r); a != nil {
@@ -142,9 +140,7 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 	password := r.PostFormValue("password")
 	ip := s.limitKey(r)
 	if s.throttled(w, r, name, ip, func(msg string) {
-		p := s.newPage("Log in", nil, loginData{Next: next, Username: name})
-		p.Error = msg
-		s.render(w, r, http.StatusTooManyRequests, "login", p)
+		s.showForm(w, r, nil, "login", "Log in", refuse(http.StatusTooManyRequests, msg), loginData{Next: next, Username: name})
 	}) {
 		return
 	}
@@ -218,9 +214,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		return
 	}
 	show := func(status int, msg string) {
-		p := s.newPage("Two-factor code", a, loginData{Next: next})
-		p.Error = msg
-		s.render(w, r, status, "totp", p)
+		s.showForm(w, r, a, "totp", "Two-factor code", refuse(status, msg), loginData{Next: next})
 	}
 	if r.Method != http.MethodPost {
 		show(http.StatusOK, "")
@@ -233,9 +227,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	ip := s.limitKey(r)
 	name := a.user.Username
 	if s.throttled(w, r, name, ip, func(msg string) {
-		p := s.newPage("Two-factor code", a, loginData{Next: next})
-		p.Error = msg
-		s.render(w, r, http.StatusTooManyRequests, "totp", p)
+		s.showForm(w, r, a, "totp", "Two-factor code", refuse(http.StatusTooManyRequests, msg), loginData{Next: next})
 	}) {
 		return
 	}
@@ -257,9 +249,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	}
 	tooMany := func() {
 		s.clearCookie(w, cookieAuth)
-		p := s.newPage("Log in", nil, loginData{Next: next})
-		p.Error = "Too many wrong codes. Log in again."
-		s.render(w, r, http.StatusUnauthorized, "login", p)
+		s.showForm(w, r, nil, "login", "Log in", refuse(http.StatusUnauthorized, "Too many wrong codes. Log in again."), loginData{Next: next})
 	}
 	if !reserved {
 		tooMany()
@@ -327,11 +317,11 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	if used == "recovery" {
 		// Say how many are left before carrying on, so running out is no
 		// surprise.
-		s.render(w, r, http.StatusOK, "message", s.newPage("Recovery code used", nil, messageData{
+		s.showForm(w, r, nil, "message", "Recovery code used", result{}, messageData{
 			Text:     fmt.Sprintf("You logged in with a recovery code and have %d left. You can make new ones on your account page.", len(u.RecoveryHashes)),
 			Link:     s.nextURL(next),
 			LinkText: "Continue",
-		}))
+		})
 		return
 	}
 	sess, _, err := s.store.SessionByID(a.sess.ID, s.opts.Now(), s.opts.SessionIdle)
@@ -383,7 +373,7 @@ func (s *Server) serveLoggedOut(w http.ResponseWriter, r *http.Request, st *stat
 	if s.cookie(r, cookieAuth) != "" && s.loadAuth(r) == nil {
 		s.clearCookie(w, cookieAuth)
 	}
-	s.render(w, r, http.StatusOK, "message", s.newPage("Logged out", nil, messageData{
+	s.showForm(w, r, nil, "message", "Logged out", result{}, messageData{
 		Text: "You have been logged out.", Link: pathLogin, LinkText: "Log in again",
-	}))
+	})
 }

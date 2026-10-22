@@ -117,9 +117,7 @@ func (s *Server) serveSetup(w http.ResponseWriter, r *http.Request, st *state) {
 	}
 	show := func(status int, d newUserData, msg string) {
 		d.MinPasswordLen, d.AskEmail = auth.MinPasswordLen, true
-		p := s.newPage("Create the first admin", nil, d)
-		p.Error = msg
-		s.render(w, r, status, "setup", p)
+		s.showForm(w, r, nil, "setup", "Create the first admin", refuse(status, msg), d)
 	}
 	if r.Method != http.MethodPost {
 		show(http.StatusOK, newUserData{}, "")
@@ -149,9 +147,9 @@ func (s *Server) serveSetup(w http.ResponseWriter, r *http.Request, st *state) {
 	}
 	s.clearCookie(w, cookieSetup)
 	s.audit(r, "setup-complete", "user", u.Username)
-	s.render(w, r, http.StatusOK, "message", s.newPage("Admin created", nil, messageData{
+	s.showForm(w, r, nil, "message", "Admin created", result{}, messageData{
 		Text: "Your admin account is ready.", Link: pathLogin, LinkText: "Log in",
-	}))
+	})
 }
 
 // --- invites ---
@@ -171,9 +169,7 @@ func (s *Server) serveInvite(w http.ResponseWriter, r *http.Request, st *state) 
 	}
 	show := func(status int, d newUserData, msg string) {
 		d.Note, d.MinPasswordLen = inv.Note, auth.MinPasswordLen
-		p := s.newPage("Create your account", nil, d)
-		p.Error = msg
-		s.render(w, r, status, "invite", p)
+		s.showForm(w, r, nil, "invite", "Create your account", refuse(status, msg), d)
 	}
 	if r.Method != http.MethodPost {
 		show(http.StatusOK, newUserData{}, "")
@@ -242,9 +238,7 @@ func (s *Server) serveReset(w http.ResponseWriter, r *http.Request, st *state) {
 		return
 	}
 	show := func(status int, msg string) {
-		p := s.newPage("Choose a password", nil, resetData{Username: u.Username, MinPasswordLen: auth.MinPasswordLen})
-		p.Error = msg
-		s.render(w, r, status, "reset", p)
+		s.showForm(w, r, nil, "reset", "Choose a password", refuse(status, msg), resetData{Username: u.Username, MinPasswordLen: auth.MinPasswordLen})
 	}
 	if r.Method != http.MethodPost {
 		show(http.StatusOK, "")
@@ -273,7 +267,7 @@ func (s *Server) serveReset(w http.ResponseWriter, r *http.Request, st *state) {
 	}
 	s.clearCookie(w, cookieReset)
 	s.audit(r, "password-reset", "user", u.Username)
-	s.render(w, r, http.StatusOK, "message", s.newPage("Password set", nil, messageData{
+	s.showForm(w, r, nil, "message", "Password set", result{}, messageData{
 		Text: "Your password has been set. You've been logged out everywhere.", Link: pathLogin, LinkText: "Log in",
-	}))
+	})
 }

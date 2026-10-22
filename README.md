@@ -51,7 +51,10 @@ YAML.
   it from the volume, e.g.
   `docker run --rm -v tabs-data:/data busybox cat /data/setup-token`.
 - **Users** have a lowercase username, display name, optional email
-  (passed on as `Remote-Email`), groups and an admin flag. An admin can add
+  (passed on as `Remote-Email`), groups and an admin flag. Users can set
+  their own email and it isn't verified (tabs sends no mail), though no two
+  accounts can share one, so apps should identify people by `Remote-User`,
+  not `Remote-Email`. An admin can add
   someone with a temporary password (they must change it at first login) or
   get a one-time link for them to choose their own.
 - **Invites** are links that let someone create their own account, landing in

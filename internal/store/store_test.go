@@ -361,3 +361,22 @@ func TestValidation(t *testing.T) {
 		t.Error("bad group name accepted")
 	}
 }
+
+func TestEmailUnique(t *testing.T) {
+	s := open(t)
+	a := &User{Username: "alice", Email: "a@example.com"}
+	if err := s.CreateUser(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUser(&User{Username: "bob", Email: "A@example.com"}); !errors.Is(err, ErrEmailTaken) {
+		t.Errorf("duplicate email on create: %v", err)
+	}
+	b := &User{Username: "bob"}
+	_ = s.CreateUser(b)
+	if _, err := s.UpdateUser(b.ID, func(u *User) error { u.Email = "a@example.com"; return nil }); !errors.Is(err, ErrEmailTaken) {
+		t.Errorf("duplicate email on update: %v", err)
+	}
+	if _, err := s.UpdateUser(a.ID, func(u *User) error { u.Email = "A@EXAMPLE.COM"; return nil }); err != nil {
+		t.Errorf("changing the case of your own email: %v", err)
+	}
+}

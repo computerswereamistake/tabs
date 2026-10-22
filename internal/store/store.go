@@ -36,6 +36,7 @@ var (
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrUsernameTaken = errors.New("username is taken")
+	ErrEmailTaken    = errors.New("that email address belongs to another account")
 	ErrGroupExists   = errors.New("group already exists")
 	ErrLastAdmin     = errors.New("that would leave no enabled admin")
 	ErrInviteUsed    = errors.New("invite is expired or used up")
@@ -297,6 +298,9 @@ func createUserTx(tx *bolt.Tx, u *User) error {
 	if err := checkGroupsTx(tx, u.Groups); err != nil {
 		return err
 	}
+	if err := checkEmailTx(tx, 0, u.Email); err != nil {
+		return err
+	}
 	users := tx.Bucket(bUsers)
 	id, err := users.NextSequence()
 	if err != nil {
@@ -381,6 +385,11 @@ func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
 		u.ID, u.Username, u.CreatedAt = before.ID, before.Username, before.CreatedAt
 		if err := checkGroupsTx(tx, u.Groups); err != nil {
 			return err
+		}
+		if u.Email != before.Email {
+			if err := checkEmailTx(tx, u.ID, u.Email); err != nil {
+				return err
+			}
 		}
 		// Anything that changes how the account proves itself, or whether it
 		// is an admin or enabled, ends existing sessions. Group changes don't
@@ -472,6 +481,24 @@ func deleteWhereTx[T any](tx *bolt.Tx, bucket []byte, match func(T) bool) error 
 	for _, k := range keys {
 		if err := b.Delete(k); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// checkEmailTx fails if another user (not id) already has email. Emails
+// are passed to apps as Remote-Email, so two accounts mustn't share one.
+func checkEmailTx(tx *bolt.Tx, id uint64, email string) error {
+	if email == "" {
+		return nil
+	}
+	users, err := all[User](tx.Bucket(bUsers))
+	if err != nil {
+		return err
+	}
+	for _, o := range users {
+		if o.ID != id && strings.EqualFold(o.Email, email) {
+			return ErrEmailTaken
 		}
 	}
 	return nil

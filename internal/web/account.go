@@ -419,7 +419,7 @@ func (s *Server) checkCurrentCode(w http.ResponseWriter, r *http.Request, a *aut
 // that are meant for users (policy and validation) get through.
 func userError(err error) string {
 	if errors.Is(err, auth.ErrPasswordPolicy) || errors.Is(err, store.ErrInvalid) ||
-		errors.Is(err, store.ErrUsernameTaken) || errors.Is(err, store.ErrGroupExists) || errors.Is(err, store.ErrLastAdmin) {
+		errors.Is(err, store.ErrUsernameTaken) || errors.Is(err, store.ErrEmailTaken) || errors.Is(err, store.ErrGroupExists) || errors.Is(err, store.ErrLastAdmin) {
 		msg := err.Error()
 		for _, prefix := range []string{auth.ErrPasswordPolicy.Error() + ": ", store.ErrInvalid.Error() + ": "} {
 			msg = strings.TrimPrefix(msg, prefix)

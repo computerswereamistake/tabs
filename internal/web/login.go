@@ -212,6 +212,31 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		return
 	}
 
+	// Reserve this attempt before checking the code, in one transaction, so
+	// parallel guesses can't all slip in under the cap.
+	reserved := false
+	if err := s.store.UpdateSession(a.sess.ID, func(x *store.Session) bool {
+		if x.Attempts >= maxTOTPAttempts {
+			return false
+		}
+		x.Attempts++
+		reserved = true
+		return true
+	}); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.fail(w, r, err)
+		return
+	}
+	tooMany := func() {
+		s.clearCookie(w, cookieAuth)
+		p := s.newPage("Log in", nil, loginData{Next: next})
+		p.Error = "Too many wrong codes. Log in again."
+		s.render(w, r, http.StatusUnauthorized, "login", p)
+	}
+	if !reserved {
+		tooMany()
+		return
+	}
+
 	code := strings.TrimSpace(r.PostFormValue("code"))
 	used := ""
 	_, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
@@ -245,15 +270,11 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		s.failed(r, name, ip, a.user.ID, "totp-failed")
 		gone := false
 		_ = s.store.UpdateSession(a.sess.ID, func(x *store.Session) bool {
-			x.Attempts++
 			gone = x.Attempts >= maxTOTPAttempts
 			return !gone
 		})
 		if gone {
-			s.clearCookie(w, cookieAuth)
-			p := s.newPage("Log in", nil, loginData{Next: next})
-			p.Error = "Too many wrong codes. Log in again."
-			s.render(w, r, http.StatusUnauthorized, "login", p)
+			tooMany()
 			return
 		}
 		show(http.StatusUnauthorized, "That code didn't work.")

@@ -137,11 +137,9 @@
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <input type="hidden" name="action" value="totp-begin">
   <input type="hidden" name="next" value="{{.Data.Next}}">
-  {{- if eq .Data.State "full"}}
   <label>Current password
     <input type="password" name="current" autocomplete="current-password" required maxlength="1024">
   </label>
-  {{- end}}
   <button type="submit">Set up two-factor login</button>
 </form>
 {{- end}}

@@ -679,6 +679,11 @@ func TestGroupRequiresTOTP(t *testing.T) {
 	if !strings.HasPrefix(b.lastURL, authBase+pathAccount) || !strings.Contains(b.last.Body.String(), "Set up two-factor login") {
 		t.Errorf("not sent to enrol: %s", b.lastURL)
 	}
+	// Even forced enrolment needs the password: this session logged in
+	// before the group started requiring TOTP.
+	if rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"totp-begin"}}, nil); rr.Code != http.StatusUnauthorized {
+		t.Errorf("forced enrolment without the password = %d", rr.Code)
+	}
 	// Only enrolment is allowed in this state.
 	if rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"profile"}, "name": {"x"}}, nil); rr.Code != http.StatusForbidden {
 		t.Errorf("profile edit while must-enrol = %d", rr.Code)

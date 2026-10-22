@@ -203,10 +203,11 @@ func (s *Server) serveAccount(w http.ResponseWriter, r *http.Request, st *state)
 			show(http.StatusBadRequest, a, "Two-factor login is already set up.", "")
 			return
 		}
-		// Voluntary enrolment re-checks the password, so a hijacked session
-		// can't bind its own authenticator and lock the owner out. A forced
-		// enrolment comes straight after the password at login.
-		if a.state == effFull && !s.checkCurrentPassword(w, r, a, show) {
+		// Re-check the password, so a hijacked session can't bind its own
+		// authenticator and lock the owner out. This applies to forced
+		// enrolment too: a group can start requiring TOTP long after the
+		// session logged in.
+		if !s.checkCurrentPassword(w, r, a, show) {
 			return
 		}
 		secret, err := auth.NewTOTPSecret()

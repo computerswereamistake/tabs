@@ -117,7 +117,10 @@ type Server struct {
 	failures map[uint64]int // consecutive failed logins per user, for LockAfter
 
 	flightMu sync.Mutex
-	inFlight map[string]int // password/code checks running per address and per username
+	inFlight map[string]int // password/code checks running per address
+
+	seenMu sync.Mutex
+	seen   map[string]time.Time // session ID -> last use, flushed by FlushSeen
 }
 
 // New returns a Server. icons should be rooted so that traversal outside it
@@ -142,6 +145,7 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 		setupToken: opts.SetupToken,
 		failures:   make(map[uint64]int),
 		inFlight:   make(map[string]int),
+		seen:       make(map[string]time.Time),
 	}
 	if s.authHost == "" || s.portalHost == "" || hostname(s.authHost) == hostname(s.portalHost) {
 		return nil, fmt.Errorf("auth and portal URLs must have different hostnames (cookies ignore ports)")
@@ -159,6 +163,27 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 		return nil, err
 	}
 	return s, nil
+}
+
+// touch notes that a session was used. It's only memory: FlushSeen writes
+// the batch, so forward-auth checks never wait on the disk.
+func (s *Server) touch(id string, t time.Time) {
+	s.seenMu.Lock()
+	if t.After(s.seen[id]) {
+		s.seen[id] = t
+	}
+	s.seenMu.Unlock()
+}
+
+// FlushSeen writes recent session activity in one transaction. Call it
+// about once a minute and before shutdown; the idle timeout is measured
+// from what was last flushed, so it can lag by that much.
+func (s *Server) FlushSeen() error {
+	s.seenMu.Lock()
+	batch := s.seen
+	s.seen = make(map[string]time.Time, len(batch))
+	s.seenMu.Unlock()
+	return s.store.TouchSessions(batch)
 }
 
 // Prune forgets stale rate-limit and ban entries. Call it periodically.
@@ -373,7 +398,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cross-Origin-Resource-Policy", "same-origin")
 
 	defer func() {
-		s.log.Info("request",
+		// Successful forward-auth checks are most of the traffic (apps
+		// poll), so they're only logged at debug level.
+		level := slog.LevelInfo
+		if r.URL.Path == pathVerify && rec.status == http.StatusOK {
+			level = slog.LevelDebug
+		}
+		s.log.Log(r.Context(), level, "request",
 			"method", r.Method,
 			"host", host,
 			"path", redactPath(r.URL.Path),

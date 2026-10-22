@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -369,9 +370,10 @@ func (s *Store) Users() ([]User, error) {
 	return out, err
 }
 
-// UpdateUser loads user id, applies fn, re-checks invariants and saves. If
-// fn changes credentials or privileges it must call bump on the user, which
-// invalidates every existing session. Errors from fn abort the update.
+// UpdateUser loads user id, applies fn, re-checks invariants and saves.
+// If fn changed credentials or privileges (see credentialsChanged), the
+// user's AuthEpoch goes up, which ends every existing session. Errors from
+// fn abort the update.
 func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
 	var out User
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -393,13 +395,8 @@ func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
 				return err
 			}
 		}
-		// Anything that changes how the account proves itself, or whether it
-		// is an admin or enabled, ends existing sessions. Group changes don't
-		// need to: every request reads the live user. Using up a recovery
-		// code isn't a change either; issuing new ones is.
 		u.AuthEpoch = before.AuthEpoch
-		if u.PasswordHash != before.PasswordHash || u.Admin != before.Admin || u.Disabled != before.Disabled ||
-			u.TOTPSecret != before.TOTPSecret || !isSubset(u.RecoveryHashes, before.RecoveryHashes) {
+		if credentialsChanged(before, u) {
 			u.AuthEpoch++
 		}
 		if (before.Admin && !before.Disabled) && (!u.Admin || u.Disabled) {
@@ -423,6 +420,21 @@ func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
 		return put(users, idKey(id), u)
 	})
 	return out, err
+}
+
+// credentialsChanged reports whether an update changes how the account
+// proves itself, or whether it is an admin or enabled; any of these ends
+// existing sessions. Group, name and email changes don't need to: every
+// request reads the live user. Using up a recovery code isn't a change;
+// issuing new ones is. TestCredentialFieldsClassified fails when User gains
+// a field that isn't classified here or in its list, so a new credential
+// (a passkey, say) can't silently skip revocation.
+func credentialsChanged(before, after User) bool {
+	return after.PasswordHash != before.PasswordHash ||
+		after.Admin != before.Admin ||
+		after.Disabled != before.Disabled ||
+		after.TOTPSecret != before.TOTPSecret ||
+		!isSubset(after.RecoveryHashes, before.RecoveryHashes)
 }
 
 func isSubset(sub, of []string) bool {
@@ -828,15 +840,28 @@ func (s *Store) GateSession(gateHash string, now time.Time, idle time.Duration) 
 	return g, sess, u, err
 }
 
-// TouchSession records activity, at most once per interval so busy apps
-// polling through forward-auth don't write on every request.
-func (s *Store) TouchSession(sess Session, now time.Time, interval time.Duration) error {
-	if now.Sub(sess.LastSeen) < interval {
+// TouchSessions records activity for many sessions in one transaction:
+// seen maps session IDs to when they were last used. The web layer keeps
+// these in memory and flushes them periodically, so forward-auth checks
+// (which busy apps make constantly) never wait on a disk write. Sessions
+// that are gone are skipped, and LastSeen never moves backwards.
+func (s *Store) TouchSessions(seen map[string]time.Time) error {
+	if len(seen) == 0 {
 		return nil
 	}
-	return s.UpdateSession(sess.ID, func(cur *Session) bool {
-		cur.LastSeen = now
-		return true
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bSessions)
+		for id, t := range seen {
+			sess, err := get[Session](b, []byte(id))
+			if err != nil || !t.After(sess.LastSeen) {
+				continue
+			}
+			sess.LastSeen = t
+			if err := put(b, []byte(id), sess); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -990,13 +1015,45 @@ func (s *Store) ConsumeCode(hash string, now time.Time) (Code, error) {
 }
 
 // CreateGate stores a gate for an existing session.
+// CreateGate stores a gate for an existing session, replacing any earlier
+// gate the session had on the same host: one gate per session per host.
 func (s *Store) CreateGate(g Gate) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bSessions).Get([]byte(g.SessionID)) == nil {
 			return ErrNotFound
 		}
+		if err := deleteWhereTx(tx, bGates, func(o Gate) bool { return o.SessionID == g.SessionID && o.Host == g.Host }); err != nil {
+			return err
+		}
 		return put(tx.Bucket(bGates), []byte(g.Hash), g)
 	})
+}
+
+// Backup writes a consistent copy of the database to path while the store
+// is open (a plain file copy of a live bbolt file can be torn). It writes
+// to a temporary file and renames it into place.
+func (s *Store) Backup(path string) error {
+	tmp := path + ".tmp"
+	err := s.db.View(func(tx *bolt.Tx) error {
+		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- operator-chosen path next to the database
+		if err != nil {
+			return err
+		}
+		if _, err := tx.WriteTo(f); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return err
+		}
+		return f.Close()
+	})
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // --- meta ---

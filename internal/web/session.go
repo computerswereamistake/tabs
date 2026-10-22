@@ -1,7 +1,6 @@
 package web
 
 import (
-	"errors"
 	"net/http"
 	"net/url"
 	"slices"
@@ -134,9 +133,7 @@ func (s *Server) loadAuth(r *http.Request) *authed {
 		return nil
 	}
 	setLogUser(r, u.Username)
-	if err := s.store.TouchSession(sess, now, time.Minute); err != nil {
-		s.log.Error("touch session", "err", err)
-	}
+	s.touch(sess.ID, now)
 	return a
 }
 
@@ -235,17 +232,6 @@ func viewerOf(u store.User) tabs.Viewer {
 
 // --- forms and CSRF ---
 
-var errForm = errors.New("bad form")
-
-// parseForm limits and parses a POST body.
-func parseForm(w http.ResponseWriter, r *http.Request) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
-	if err := r.ParseForm(); err != nil {
-		return errForm
-	}
-	return nil
-}
-
 // sameOrigin reports whether a POST's Origin is one of allowed. A missing
 // Origin is refused: every browser this app supports sends it on POST.
 func sameOrigin(r *http.Request, allowed ...string) bool {
@@ -259,16 +245,13 @@ func sameOrigin(r *http.Request, allowed ...string) bool {
 	return slices.Contains(allowed, o)
 }
 
-// checkPost does the method, origin, body and (when a session is given)
-// CSRF-token checks every auth-host POST needs. On failure it has already
+// checkPost does the origin and (when a session is given) CSRF-token checks
+// every auth-host POST needs. ServeHTTP has already limited and parsed the
+// body. On failure it has already
 // written the response.
 func (s *Server) checkPost(w http.ResponseWriter, r *http.Request, a *authed) bool {
 	if !sameOrigin(r, s.authOrigin) {
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
-		return false
-	}
-	if err := parseForm(w, r); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
 		return false
 	}
 	if a != nil && !auth.TokensEqual(r.PostFormValue("csrf"), a.sess.CSRF) {

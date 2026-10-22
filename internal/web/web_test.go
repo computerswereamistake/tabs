@@ -1192,3 +1192,32 @@ func TestUsersCantSetTheirOwnEmail(t *testing.T) {
 		t.Errorf("after profile save: name %q email %q", u.Name, u.Email)
 	}
 }
+
+// Verify records activity in memory; the database is only written when the
+// batch is flushed.
+func TestVerifyDoesNotWrite(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	if err := e.s.FlushSeen(); err != nil {
+		t.Fatal(err)
+	}
+	ss, _ := e.st.UserSessions(bob.ID)
+	before := ss[0].LastSeen
+	e.now = e.now.Add(10 * time.Minute)
+	for range 20 {
+		if rr := b.verify("alpha", "tabs.example.com", nil); rr.Code != http.StatusOK {
+			t.Fatal(rr.Code)
+		}
+	}
+	if ss, _ := e.st.UserSessions(bob.ID); !ss[0].LastSeen.Equal(before) {
+		t.Error("verify wrote to the database")
+	}
+	if err := e.s.FlushSeen(); err != nil {
+		t.Fatal(err)
+	}
+	if ss, _ := e.st.UserSessions(bob.ID); !ss[0].LastSeen.Equal(e.now) {
+		t.Errorf("after flush LastSeen = %v, want %v", ss[0].LastSeen, e.now)
+	}
+}

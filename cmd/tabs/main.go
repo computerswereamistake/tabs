@@ -43,6 +43,7 @@ type deps struct {
 	stdout   io.Writer
 	onListen func(net.Addr) // optional: called once listening
 	onReload func(error)    // optional: called after each SIGHUP
+	onBackup func(error)    // optional: called after each SIGUSR1
 }
 
 func (d deps) env(key, def string) string {
@@ -81,7 +82,7 @@ func main() {
 	}
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
 	d.sigs = sigs
 
 	if err := run(d); err != nil {
@@ -386,17 +387,45 @@ func run(d deps) error {
 	go func() { errc <- srv.Serve(ln) }()
 	prune := time.NewTicker(5 * time.Minute)
 	defer prune.Stop()
+	flush := time.NewTicker(time.Minute)
+	defer flush.Stop()
+	// Write out recent session activity on the way out too.
+	defer func() {
+		if err := app.FlushSeen(); err != nil {
+			log.Error("flush session activity", "err", err)
+		}
+	}()
+	backupPath := set.dbPath + ".bak"
 
 	for {
 		select {
 		case err := <-errc:
 			return err
+		case <-flush.C:
+			if err := app.FlushSeen(); err != nil {
+				log.Error("flush session activity", "err", err)
+			}
 		case <-prune.C:
+			if err := app.FlushSeen(); err != nil {
+				log.Error("flush session activity", "err", err)
+			}
 			if err := st.Prune(time.Now(), idle); err != nil {
 				log.Error("prune", "err", err)
 			}
 			app.Prune()
 		case sig := <-d.sigs:
+			if sig == syscall.SIGUSR1 {
+				err := st.Backup(backupPath)
+				if err != nil {
+					log.Error("backup failed", "err", err)
+				} else {
+					log.Info("backup written", "path", backupPath)
+				}
+				if d.onBackup != nil {
+					d.onBackup(err)
+				}
+				continue
+			}
 			if sig == syscall.SIGHUP {
 				next, err := tabs.Load(cfgPath)
 				if err == nil {

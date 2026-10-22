@@ -34,10 +34,11 @@ const (
 )
 
 // hashSlots bounds concurrent argon2 runs, so a burst of logins can't
-// allocate unbounded memory (4 x 64 MiB at most). Callers wait up to
-// hashWait for a slot and otherwise get ErrBusy.
+// allocate unbounded memory (2 x 64 MiB live, plus GC headroom). Two is
+// plenty for a household's logins; callers wait up to hashWait for a slot
+// and otherwise get ErrBusy.
 var (
-	hashSlots = make(chan struct{}, 4)
+	hashSlots = make(chan struct{}, 2)
 	hashWait  = 5 * time.Second
 )
 

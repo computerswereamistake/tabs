@@ -138,9 +138,11 @@ func TestRunLifecycle(t *testing.T) {
 	sigs := make(chan os.Signal)
 	addrc := make(chan net.Addr, 1)
 	reloads := make(chan error)
+	backups := make(chan error)
 	d := f.deps(sigs)
 	d.onListen = func(a net.Addr) { addrc <- a }
 	d.onReload = func(err error) { reloads <- err }
+	d.onBackup = func(err error) { backups <- err }
 
 	done := make(chan error, 1)
 	go func() { done <- run(d) }()
@@ -185,6 +187,14 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	if got := getTitle(t, base); got != "Log in · Second" {
 		t.Fatalf("after bad reload title = %q, want previous config kept", got)
+	}
+
+	sigs <- syscall.SIGUSR1
+	if err := <-backups; err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if fi, err := os.Stat(f.env["TABS_DB"] + ".bak"); err != nil || fi.Size() == 0 {
+		t.Fatalf("backup file: %v", err)
 	}
 
 	// Drop the test client's keep-alive connections so Shutdown has nothing

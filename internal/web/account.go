@@ -5,6 +5,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"slices"
 	"strings"
 
 	"rsc.io/qr"
@@ -140,7 +141,7 @@ func (s *Server) serveAccount(w http.ResponseWriter, r *http.Request, st *state)
 		effMustChangePW: {"password"},
 		effMustEnrol:    {"totp-begin", "totp-confirm"},
 	}
-	if list, limited := allowed[a.state]; limited && !contains(list, action) {
+	if list, limited := allowed[a.state]; limited && !slices.Contains(list, action) {
 		show(http.StatusForbidden, a, "Finish this step first.", "")
 		return
 	}
@@ -437,13 +438,4 @@ func userError(err error) string {
 		return strings.ToUpper(msg[:1]) + msg[1:] + "."
 	}
 	return "Something went wrong."
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -400,5 +401,91 @@ func TestPasswordChangeVoidsResets(t *testing.T) {
 	}
 	if _, err := s.RedeemReset("r", now, "attacker"); err == nil {
 		t.Error("reset link still works after a password change")
+	}
+}
+
+// Every User field must be classified: either it ends sessions when it
+// changes (credentialsChanged) or it deliberately doesn't. A new field fails
+// this test until someone decides which.
+func TestCredentialFieldsClassified(t *testing.T) {
+	credential := map[string]bool{"PasswordHash": true, "Admin": true, "Disabled": true, "TOTPSecret": true, "RecoveryHashes": true}
+	notCredential := map[string]bool{
+		"ID": true, "Username": true, "Name": true, "Email": true, "Groups": true, "TOTPLastStep": true,
+		"Locked": true, "MustChangePassword": true, "CreatedAt": true, "AuthEpoch": true,
+	}
+	typ := reflect.TypeFor[User]()
+	for i := range typ.NumField() {
+		f := typ.Field(i).Name
+		if credential[f] == notCredential[f] {
+			t.Errorf("User.%s isn't classified as credential or not; update credentialsChanged and this test", f)
+		}
+	}
+	for f := range credential {
+		before := User{RecoveryHashes: []string{"a"}}
+		after := before
+		v := reflect.ValueOf(&after).Elem().FieldByName(f)
+		switch v.Kind() {
+		case reflect.String:
+			v.SetString("changed")
+		case reflect.Bool:
+			v.SetBool(true)
+		case reflect.Slice:
+			v.Set(reflect.ValueOf([]string{"b"}))
+		}
+		if !credentialsChanged(before, after) {
+			t.Errorf("changing %s doesn't count as a credential change", f)
+		}
+	}
+}
+
+func TestTouchSessions(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	_ = s.CreateSession(Session{ID: "s", Hash: "h", UserID: u.ID, AuthEpoch: u.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	if err := s.TouchSessions(map[string]time.Time{"s": now.Add(time.Minute), "gone": now}); err != nil {
+		t.Fatal(err)
+	}
+	ss, _ := s.UserSessions(u.ID)
+	if !ss[0].LastSeen.Equal(now.Add(time.Minute)) {
+		t.Errorf("LastSeen = %v", ss[0].LastSeen)
+	}
+	_ = s.TouchSessions(map[string]time.Time{"s": now}) // older: ignored
+	ss, _ = s.UserSessions(u.ID)
+	if !ss[0].LastSeen.Equal(now.Add(time.Minute)) {
+		t.Error("LastSeen moved backwards")
+	}
+}
+
+func TestOneGatePerSessionAndHost(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	_ = s.CreateSession(Session{ID: "s", Hash: "h", UserID: u.ID, AuthEpoch: u.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	_ = s.CreateGate(Gate{Hash: "g1", SessionID: "s", Host: "a.example.com"})
+	_ = s.CreateGate(Gate{Hash: "g2", SessionID: "s", Host: "b.example.com"})
+	_ = s.CreateGate(Gate{Hash: "g3", SessionID: "s", Host: "a.example.com"})
+	if _, _, _, err := s.GateSession("g1", now, time.Hour); err == nil {
+		t.Error("replaced gate still works")
+	}
+	for _, g := range []string{"g2", "g3"} {
+		if _, _, _, err := s.GateSession(g, now, time.Hour); err != nil {
+			t.Errorf("gate %s: %v", g, err)
+		}
+	}
+}
+
+func TestBackup(t *testing.T) {
+	s := open(t)
+	mustUser(t, s, "alice", true)
+	path := filepath.Join(t.TempDir(), "backup.db")
+	if err := s.Backup(path); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if u, err := b.UserByName("alice"); err != nil || !u.Admin {
+		t.Errorf("backup missing data: %v", err)
 	}
 }

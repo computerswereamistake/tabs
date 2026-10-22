@@ -71,10 +71,6 @@ func (s *Server) servePortalLogout(w http.ResponseWriter, r *http.Request, host 
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
-	if err := parseForm(w, r); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
 	if tok := s.cookie(r, cookieGate); tok != "" {
 		if g := s.gateFromToken(tok, host); g != nil {
 			if !auth.TokensEqual(r.PostFormValue("csrf"), g.gate.CSRF) {

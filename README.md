@@ -73,7 +73,8 @@ YAML.
   sessions (you stay logged in on the browser that made the change). Group
   changes apply on the next request without logging anyone out.
 - **Failed logins** back off per username and address, with at most two
-  checks running at once for either. Ten failures (password or code) from
+  checks running at once per address (per username, each attempt counts
+  before it runs, so a parallel burst gains nothing). Ten failures (password or code) from
   one address in 15 minutes ban it for an hour (IPv6 addresses count by
   their /64); the admin *Bans* page lists and lifts bans. A ban never locks
   an account, so nobody can lock you out from elsewhere. If you'd rather
@@ -228,8 +229,16 @@ networks:
 ```
 
 A new named volume takes the image's `/data` ownership (uid 65532). With a
-bind mount instead, `chown 65532` the directory yourself. Back up the volume;
-the setup link, once used, can't be regenerated except with `tabs recover`.
+bind mount instead, `chown 65532` the directory yourself.
+
+**Backups.** Don't copy `tabs.db` while tabs runs: the copy can be torn.
+Instead `docker kill --signal=USR1 tabs`, which writes a consistent
+`/data/tabs.db.bak` (logged as `backup written`), and back that up. Keep the
+`TABS_SECRET_KEY_FILE` key in a separate backup.
+
+**Memory.** Password checks use up to 2 × 64 MiB at once; the image sets
+`GOMEMLIMIT=192MiB`. Give the container at least 256 MiB, and raise
+`GOMEMLIMIT` with it.
 
 ### Caddy
 
@@ -336,6 +345,11 @@ app routes, and use the snippet above. Remove `logoutURL` from `tabs.yaml`.
 
 ### Operations
 
+- Session activity is written to the database about once a minute (and at
+  shutdown), not on every request, so the idle timeout can be up to a minute
+  late and "last seen" on the account page up to a minute old.
+- Successful forward-auth checks are logged at debug level only; they're
+  most of the traffic.
 - The icons dir is opened once at startup. Editing or adding files in it
   takes effect immediately; replacing the directory itself needs a restart
   (`SIGHUP` only re-reads the YAML).

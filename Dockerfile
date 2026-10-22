@@ -17,6 +17,9 @@ COPY --from=build /out/tabs /tabs
 # the nonroot user (65532) can write to it.
 COPY --from=build --chown=65532:65532 /out/data /data
 VOLUME /data
+# Password hashing uses up to 2 x 64 MiB at once; keep the Go heap from
+# overshooting a small container limit. Raise it with your memory limit.
+ENV GOMEMLIMIT=192MiB
 EXPOSE 8080
 USER nonroot:nonroot
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["/tabs", "healthcheck"]

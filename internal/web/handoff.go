@@ -199,9 +199,7 @@ func (s *Server) serveVerify(w http.ResponseWriter, r *http.Request, st *state) 
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if err := s.store.TouchSession(g.sess, s.opts.Now(), time.Minute); err != nil {
-		s.log.Error("touch session", "err", err)
-	}
+	s.touch(g.sess.ID, s.opts.Now())
 	h := w.Header()
 	h.Set("Remote-User", v.User)
 	h.Set("Remote-Name", v.Name)

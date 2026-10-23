@@ -294,11 +294,19 @@ other.example.com {                       # a tab with url: https://other.exampl
   if the `request_header` line is ever wrong, a portal app's backend could
   replay a user's gate against other portal apps. Put apps you don't trust on
   their own host.
-- **Keep tokens out of Caddy's access logs.** Setup, handoff and reset
-  links carry one-time tokens in the URL (tabs redacts its own logs). They
-  are short-lived and single-use, but if you keep access logs, filter them
-  out, e.g. `log { format filter { request>uri query { delete token delete
-  code delete state } } }`.
+- **Keep tokens out of Caddy's access logs.** Invite and reset links carry
+  a token in the path (`/_tabs/reset/<token>`), and setup and handoff URLs
+  in the query (`token`, `code`, `state`). Tabs redacts its own logs; an
+  unused invite or reset link in someone else's log is usable. If you keep
+  access logs, redact both kinds in each site that reaches tabs:
+
+  ```caddyfile
+  log {
+  	format filter {
+  		request>uri regexp "(/_tabs/(?:invite|reset)/)[^?]*|([?&](?:token|code|state)=)[^&]*" "${1}${2}REDACTED"
+  	}
+  }
+  ```
 - Don't give two tabs with different `groups` the same upstream: the gate
   is only as precise as Caddy's path matching.
 - Framed apps that send `X-Frame-Options: DENY` or a restrictive

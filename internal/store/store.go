@@ -163,7 +163,35 @@ type Gate struct {
 
 // Store is the database handle.
 type Store struct {
-	db *bolt.DB
+	db    *bolt.DB
+	actor Actor // re-checked in every write transaction; see As
+}
+
+// As returns a view of the store that makes every write on behalf of a:
+// each write transaction first re-checks the actor (actorOKTx), so a
+// privileged change can't land after the actor's session ended or they
+// lost admin while the request was in flight (e.g. during password
+// hashing). The zero Actor checks nothing.
+func (s *Store) As(a Actor) *Store {
+	c := *s
+	c.actor = a
+	return &c
+}
+
+// update runs fn in a write transaction after re-checking the actor.
+func (s *Store) update(fn func(tx *bolt.Tx) error) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := actorOKTx(tx, s.actor); err != nil {
+			return err
+		}
+		return fn(tx)
+	})
+}
+
+// CheckActor reports whether the actor is still valid, for privileged
+// actions that don't write to the store (lifting an in-memory ban).
+func (s *Store) CheckActor() error {
+	return s.db.View(func(tx *bolt.Tx) error { return actorOKTx(tx, s.actor) })
 }
 
 // Open opens (creating if needed) the database at path. It fails fast if
@@ -287,7 +315,7 @@ func (s *Store) UserCount() (int, error) {
 // CreateUser stores a new user and assigns its ID. Username must already be
 // normalized; groups must exist.
 func (s *Store) CreateUser(u *User) error {
-	return s.db.Update(func(tx *bolt.Tx) error { return createUserTx(tx, u) })
+	return s.update(func(tx *bolt.Tx) error { return createUserTx(tx, u) })
 }
 
 func createUserTx(tx *bolt.Tx, u *User) error {
@@ -323,7 +351,7 @@ func createUserTx(tx *bolt.Tx, u *User) error {
 // CreateFirstAdmin creates u as an admin only if there are no users yet, so
 // two racing setup requests can't both succeed.
 func (s *Store) CreateFirstAdmin(u *User) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bUsers).Stats().KeyN > 0 {
 			return fmt.Errorf("%w: setup is already complete", ErrInvalid)
 		}
@@ -375,7 +403,7 @@ func (s *Store) Users() ([]User, error) {
 // user's AuthEpoch goes up, which ends every existing session. Errors from
 // fn abort the update.
 func (s *Store) UpdateUser(id uint64, fn func(u *User) error) (User, error) {
-	return s.UpdateUserAs(Actor{}, id, fn)
+	return s.updateUser(id, fn)
 }
 
 // Actor is who is making a change, for UpdateUserAs. The zero Actor (the
@@ -412,11 +440,12 @@ func actorOKTx(tx *bolt.Tx, a Actor) error {
 // UpdateUserAs is UpdateUser on behalf of a, which is re-checked in the
 // same transaction (see actorOKTx).
 func (s *Store) UpdateUserAs(a Actor, id uint64, fn func(u *User) error) (User, error) {
+	return s.As(a).updateUser(id, fn)
+}
+
+func (s *Store) updateUser(id uint64, fn func(u *User) error) (User, error) {
 	var out User
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		if err := actorOKTx(tx, a); err != nil {
-			return err
-		}
+	err := s.update(func(tx *bolt.Tx) error {
 		users := tx.Bucket(bUsers)
 		u, err := get[User](users, idKey(id))
 		if err != nil {
@@ -502,7 +531,7 @@ func ensureOtherAdminTx(tx *bolt.Tx, id uint64) error {
 
 // DeleteUser removes a user, their sessions and their reset links.
 func (s *Store) DeleteUser(id uint64) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		users := tx.Bucket(bUsers)
 		u, err := get[User](users, idKey(id))
 		if err != nil {
@@ -585,7 +614,7 @@ func (s *Store) CreateGroup(g Group) error {
 	if !GroupNameRE.MatchString(g.Name) {
 		return fmt.Errorf("%w: group name must be 1-64 of a-z 0-9 -", ErrInvalid)
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bGroups)
 		if b.Get([]byte(g.Name)) != nil {
 			return ErrGroupExists
@@ -596,7 +625,7 @@ func (s *Store) CreateGroup(g Group) error {
 
 // UpdateGroup changes a group's description or TOTP requirement.
 func (s *Store) UpdateGroup(g Group) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bGroups)
 		if b.Get([]byte(g.Name)) == nil {
 			return ErrNotFound
@@ -619,7 +648,7 @@ func (s *Store) Groups() ([]Group, error) {
 // DeleteGroup removes a group and takes it off every user and invite, so
 // recreating the name later doesn't quietly grant anything.
 func (s *Store) DeleteGroup(name string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		gb := tx.Bucket(bGroups)
 		if gb.Get([]byte(name)) == nil {
 			return ErrNotFound
@@ -664,7 +693,7 @@ func (s *Store) CreateInvite(inv Invite) error {
 	if inv.Hash == "" || inv.MaxUses < 1 || inv.ExpiresAt.IsZero() {
 		return ErrInvalid
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if err := checkGroupsTx(tx, inv.Groups); err != nil {
 			return err
 		}
@@ -697,7 +726,7 @@ func (s *Store) Invites() ([]Invite, error) {
 
 // DeleteInvite revokes an invite.
 func (s *Store) DeleteInvite(hash string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bInvites)
 		if b.Get([]byte(hash)) == nil {
 			return ErrNotFound
@@ -710,7 +739,7 @@ func (s *Store) DeleteInvite(hash string) error {
 // invite can never be used more than MaxUses times. u gets the invite's
 // groups (that still exist); invites never grant admin.
 func (s *Store) RedeemInvite(hash string, now time.Time, u *User) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		ib := tx.Bucket(bInvites)
 		inv, err := get[Invite](ib, []byte(hash))
 		if err != nil {
@@ -736,7 +765,7 @@ func (s *Store) RedeemInvite(hash string, now time.Time, u *User) error {
 
 // CreateReset stores a reset link, replacing any earlier one for the user.
 func (s *Store) CreateReset(r Reset) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bUsers).Get(idKey(r.UserID)) == nil {
 			return ErrNotFound
 		}
@@ -767,7 +796,7 @@ func (s *Store) Reset(hash string, now time.Time) (Reset, error) {
 // still needs a code. A disabled user can't be reset back in.
 func (s *Store) RedeemReset(hash string, now time.Time, passwordHash string) (User, error) {
 	var out User
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		rb := tx.Bucket(bResets)
 		r, err := get[Reset](rb, []byte(hash))
 		if err != nil || !now.Before(r.ExpiresAt) {
@@ -806,7 +835,7 @@ func (s *Store) CreateSession(sess Session) error {
 	if sess.ID == "" || sess.Hash == "" {
 		return ErrInvalid
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bSessionTokens).Put([]byte(sess.Hash), []byte(sess.ID)); err != nil {
 			return err
 		}
@@ -891,7 +920,7 @@ func (s *Store) TouchSessions(seen map[string]time.Time) error {
 	if len(seen) == 0 {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bSessions)
 		for id, t := range seen {
 			sess, err := get[Session](b, []byte(id))
@@ -911,7 +940,7 @@ func (s *Store) TouchSessions(seen map[string]time.Time) error {
 // session (and its gates) if fn returns false. fn must not change ID or
 // Hash; use RotateSession for that.
 func (s *Store) UpdateSession(id string, fn func(*Session) (keep bool)) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bSessions)
 		sess, err := get[Session](b, []byte(id))
 		if err != nil {
@@ -930,7 +959,7 @@ func (s *Store) UpdateSession(id string, fn func(*Session) (keep bool)) error {
 // transaction. The old token stops working. Gates and codes, which point at
 // the ID, are unaffected.
 func (s *Store) RotateSession(id, newHash string, fn func(*Session)) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bSessions)
 		sess, err := get[Session](b, []byte(id))
 		if err != nil {
@@ -953,7 +982,7 @@ func (s *Store) RotateSession(id, newHash string, fn func(*Session)) error {
 
 // DeleteSession removes one session and its gates.
 func (s *Store) DeleteSession(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return deleteSessionsTx(tx, func(x Session) bool { return x.ID == id })
 	})
 }
@@ -977,7 +1006,7 @@ func (s *Store) UserSessions(userID uint64) ([]Session, error) {
 // DeleteUserSessions removes all of a user's sessions (and their gates)
 // except the one with ID keep ("" for none).
 func (s *Store) DeleteUserSessions(userID uint64, keep string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return deleteSessionsTx(tx, func(x Session) bool { return x.UserID == userID && x.ID != keep })
 	})
 }
@@ -1010,7 +1039,7 @@ func deleteSessionsTx(tx *bolt.Tx, match func(Session) bool) error {
 // per session, so a looping script can't grow the database; past that the
 // oldest is dropped, so a hostile page can't block real sign-ins either.
 func (s *Store) CreateCode(c Code, now time.Time, maxPending int) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bSessions).Get([]byte(c.SessionID)) == nil {
 			return ErrNotFound
 		}
@@ -1038,7 +1067,7 @@ func (s *Store) CreateCode(c Code, now time.Time, maxPending int) error {
 // ConsumeCode deletes and returns a live handoff code. A code works once.
 func (s *Store) ConsumeCode(hash string, now time.Time) (Code, error) {
 	var c Code
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bCodes)
 		var err error
 		c, err = get[Code](b, []byte(hash))
@@ -1064,7 +1093,7 @@ const maxGatesPerHost = 2
 // CreateGate stores a gate for an existing session, dropping that
 // session's oldest gates on the same host beyond maxGatesPerHost.
 func (s *Store) CreateGate(g Gate) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bSessions).Get([]byte(g.SessionID)) == nil {
 			return ErrNotFound
 		}
@@ -1130,7 +1159,7 @@ func (s *Store) Meta(key string) ([]byte, error) {
 
 // SetMeta stores a metadata value.
 func (s *Store) SetMeta(key string, v []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bMeta).Put([]byte(key), v)
 	})
 }
@@ -1142,7 +1171,7 @@ func (s *Store) SetMeta(key string, v []byte) error {
 // changed.
 func (s *Store) RewriteTOTPSecrets(fn func(id uint64, sealed string) (string, error), metaKey string, metaVal []byte) (int, error) {
 	n := 0
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bMeta).Put([]byte(metaKey), metaVal); err != nil {
 			return err
 		}
@@ -1184,7 +1213,7 @@ func (s *Store) RewriteTOTPSecrets(fn func(id uint64, sealed string) (string, er
 // Prune deletes expired sessions (with their gates), invites, resets and
 // codes.
 func (s *Store) Prune(now time.Time, idle time.Duration) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		if err := deleteSessionsTx(tx, func(x Session) bool {
 			return !now.Before(x.ExpiresAt) || now.Sub(x.LastSeen) > idle
 		}); err != nil {

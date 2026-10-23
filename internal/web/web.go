@@ -19,6 +19,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -119,8 +120,9 @@ type Server struct {
 	flightMu sync.Mutex
 	inFlight map[string]int // password/code checks running per address
 
-	seenMu sync.Mutex
-	seen   map[string]time.Time // session ID -> last use, flushed by FlushSeen
+	seenMu  sync.Mutex
+	seen    map[string]time.Time // session ID -> last use, flushed by FlushSeen
+	flushed map[string]flushRec  // what flushes wrote, and when
 }
 
 // New returns a Server. icons should be rooted so that traversal outside it
@@ -146,6 +148,7 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 		failures:   make(map[uint64]int),
 		inFlight:   make(map[string]int),
 		seen:       make(map[string]time.Time),
+		flushed:    make(map[string]flushRec),
 	}
 	if s.authHost == "" || s.portalHost == "" || hostname(s.authHost) == hostname(s.portalHost) {
 		return nil, fmt.Errorf("auth and portal URLs must have different hostnames (cookies ignore ports)")
@@ -175,15 +178,46 @@ func (s *Server) touch(id string, t time.Time) {
 	s.seenMu.Unlock()
 }
 
+// flushGrace is how long an entry stays in memory after it was written: a
+// request may have read the stored session just before the write committed,
+// and idleOK must still find the newer time here. It's a duration, not a
+// number of flushes, because flushes can run back to back.
+const flushGrace = 30 * time.Second
+
+type flushRec struct {
+	t  time.Time // activity time written
+	at time.Time // when it was written
+}
+
 // FlushSeen writes recent session activity in one transaction. Call it
-// about once a minute and before shutdown; the idle timeout is measured
-// from what was last flushed, so it can lag by that much.
+// about once a minute and before shutdown. An entry is dropped from memory
+// only once it has been stored for flushGrace and nothing newer arrived.
 func (s *Server) FlushSeen() error {
 	s.seenMu.Lock()
-	batch := s.seen
-	s.seen = make(map[string]time.Time, len(batch))
+	batch := maps.Clone(s.seen)
 	s.seenMu.Unlock()
-	return s.store.TouchSessions(batch)
+	if err := s.store.TouchSessions(batch); err != nil {
+		return err
+	}
+	now := s.opts.Now()
+	s.seenMu.Lock()
+	for id, f := range s.flushed {
+		cur, live := s.seen[id]
+		if !live || (now.Sub(f.at) >= flushGrace && cur.Equal(f.t)) {
+			delete(s.seen, id)
+			delete(s.flushed, id)
+		}
+	}
+	for id, t := range batch {
+		if cur, live := s.seen[id]; !live || !cur.Equal(t) {
+			continue // dropped above, or newer activity the next flush writes
+		}
+		if f, ok := s.flushed[id]; !ok || !f.t.Equal(t) {
+			s.flushed[id] = flushRec{t: t, at: now}
+		}
+	}
+	s.seenMu.Unlock()
+	return nil
 }
 
 // Prune forgets stale rate-limit and ban entries. Call it periodically.

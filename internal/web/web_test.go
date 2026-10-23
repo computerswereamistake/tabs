@@ -1247,3 +1247,75 @@ func TestIdleCountsUnflushedActivity(t *testing.T) {
 		t.Error("idle session still valid")
 	}
 }
+
+// A request that read the stored session just before a flush committed
+// still sees the newer activity in memory.
+func TestFlushKeepsActivityVisible(t *testing.T) {
+	e := newEnv(t) // idle timeout 24h
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	if err := e.s.FlushSeen(); err != nil {
+		t.Fatal(err)
+	}
+	ss, _ := e.st.UserSessions(bob.ID)
+	stale := ss[0] // read "before the flush": LastSeen is login time
+	e.now = e.now.Add(23 * time.Hour)
+	b.verify("alpha", "tabs.example.com", nil) // activity, in memory only
+	// Two flushes back to back (the minute and prune tickers coincide):
+	// the entry must survive both.
+	for range 2 {
+		if err := e.s.FlushSeen(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !e.s.idleOK(stale, e.now.Add(2*time.Hour)) {
+		t.Error("activity vanished right after back-to-back flushes")
+	}
+	e.now = e.now.Add(2 * time.Hour) // stale LastSeen is 25h old; real activity 2h
+	if !e.s.idleOK(stale, e.now) {
+		t.Error("activity vanished after a flush")
+	}
+	// A later flush with no new activity drops the entry; the store has it.
+	if err := e.s.FlushSeen(); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.s.seen) != 0 || len(e.s.flushed) != 0 {
+		t.Errorf("cache not drained: seen %v, flushed %v", e.s.seen, e.s.flushed)
+	}
+	// And stays drained: further flushes don't resurrect anything.
+	e.now = e.now.Add(time.Hour)
+	_ = e.s.FlushSeen()
+	if len(e.s.seen) != 0 || len(e.s.flushed) != 0 {
+		t.Errorf("cache grew back: seen %v, flushed %v", e.s.seen, e.s.flushed)
+	}
+	if rr := b.verify("alpha", "tabs.example.com", nil); rr.Code != http.StatusOK {
+		t.Errorf("after drain = %d", rr.Code)
+	}
+}
+
+// An admin demoted while a request was in flight can't create users.
+func TestDemotedAdminCantCreate(t *testing.T) {
+	e := newEnv(t)
+	ann := e.user("ann", true)
+	e.user("root", true)
+	b := e.browser()
+	b.login("ann", "password-for-ann")
+	b.follow("GET", authBase+pathAdmin+"/users", nil)
+	csrf := b.csrf()
+	// Simulate the demotion landing mid-request: the request's session was
+	// loaded as an admin, but the write sees the change.
+	ss, _ := e.st.UserSessions(ann.ID)
+	a := &authed{sess: ss[0], user: ann, state: effFull}
+	_, _ = e.st.UpdateUser(ann.ID, func(u *store.User) error { u.Admin = false; return nil })
+	c := &adminCtx{w: httptest.NewRecorder(), r: httptest.NewRequest(http.MethodPost, "/", nil), a: a,
+		db: e.st.As(store.Actor{SessionID: a.sess.ID, Admin: true})}
+	c.r.PostForm = url.Values{"csrf": {csrf}, "action": {"create"}, "username": {"evil"}, "admin": {"on"}}
+	rec := c.w.(*httptest.ResponseRecorder)
+	if res := e.s.adminCreateUser(c); !res.written || rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != pathLogin {
+		t.Errorf("result = %+v, response %d %q", res, rec.Code, rec.Header().Get("Location"))
+	}
+	if _, err := e.st.UserByName("evil"); err == nil {
+		t.Error("demoted admin created an account")
+	}
+}

@@ -521,3 +521,51 @@ func TestUpdateUserAsRechecksActor(t *testing.T) {
 		t.Errorf("demoted admin: %v", err)
 	}
 }
+
+// Every write through As re-checks the actor, not just user updates.
+func TestAsChecksEveryWrite(t *testing.T) {
+	s := open(t)
+	admin := mustUser(t, s, "root", true)
+	mustUser(t, s, "other", true)
+	_ = s.CreateSession(Session{ID: "a", Hash: "h", UserID: admin.ID, AuthEpoch: admin.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	as := s.As(Actor{SessionID: "a", Admin: true})
+	if err := as.CreateGroup(Group{Name: "ok"}); err != nil {
+		t.Fatalf("valid admin: %v", err)
+	}
+	// Demoted mid-request: every kind of privileged write is refused.
+	_, _ = s.UpdateUser(admin.ID, func(u *User) error { u.Admin = false; return nil })
+	other, _ := s.UserByName("other")
+	writes := map[string]error{
+		"create user":     as.CreateUser(&User{Username: "evil", Admin: true}),
+		"create group":    as.CreateGroup(Group{Name: "g2"}),
+		"update group":    as.UpdateGroup(Group{Name: "ok", RequireTOTP: true}),
+		"delete group":    as.DeleteGroup("ok"),
+		"create invite":   as.CreateInvite(Invite{Hash: "i", MaxUses: 1, ExpiresAt: now.Add(time.Hour)}),
+		"delete invite":   as.DeleteInvite("i"),
+		"create reset":    as.CreateReset(Reset{Hash: "r", UserID: admin.ID, ExpiresAt: now.Add(time.Hour)}),
+		"delete user":     as.DeleteUser(other.ID),
+		"revoke sessions": as.DeleteUserSessions(other.ID, ""),
+		"check":           as.CheckActor(),
+	}
+	for name, err := range writes {
+		if !errors.Is(err, ErrStaleSession) {
+			t.Errorf("%s by a demoted admin: %v", name, err)
+		}
+	}
+	if _, err := s.UserByName("evil"); err == nil {
+		t.Error("demoted admin created a user")
+	}
+}
+
+// A valid session whose user isn't an admin can't make admin writes.
+func TestAsRequiresAdmin(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "bob", false)
+	_ = s.CreateSession(Session{ID: "b", Hash: "h", UserID: u.ID, AuthEpoch: u.AuthEpoch, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	if err := s.As(Actor{SessionID: "b", Admin: true}).CreateGroup(Group{Name: "g"}); !errors.Is(err, ErrStaleSession) {
+		t.Errorf("non-admin admin write: %v", err)
+	}
+	if err := s.As(Actor{SessionID: "b"}).CheckActor(); err != nil {
+		t.Errorf("non-admin self actor: %v", err)
+	}
+}

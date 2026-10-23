@@ -73,6 +73,9 @@ type adminCtx struct {
 	st     *state
 	target store.User // the user on /admin/users/{id}
 	self   bool       // target is the admin making the request
+	// db makes every write on behalf of this admin: each transaction
+	// re-checks that their session is valid and they're still an admin.
+	db *store.Store
 }
 
 // adminPage is one admin page: its template, how to load its data (fresh
@@ -148,7 +151,7 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request, st *state) {
 	if r.Method == http.MethodPost && !s.checkPost(w, r, a) {
 		return
 	}
-	c := &adminCtx{w: w, r: r, a: a, st: st}
+	c := &adminCtx{w: w, r: r, a: a, st: st, db: s.store.As(store.Actor{SessionID: a.sess.ID, Admin: true})}
 	p := strings.TrimPrefix(r.URL.Path, pathAdmin)
 	switch {
 	case p == "" || p == "/":
@@ -202,6 +205,22 @@ func (s *Server) runAdmin(c *adminCtx, pg adminPage) {
 	s.showForm(c.w, c.r, c.a, pg.template, pg.heading(c), res, data)
 }
 
+// adminErr turns an error from an admin action into what to show. If the
+// admin's session ended or they lost admin while the request was in
+// flight, nothing was changed and they're sent to log in.
+func (s *Server) adminErr(c *adminCtx, err error) result {
+	switch {
+	case errors.Is(err, store.ErrStaleSession):
+		http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
+		return handled
+	case errors.Is(err, auth.ErrPasswordPolicy), errors.Is(err, store.ErrInvalid), errors.Is(err, store.ErrUsernameTaken),
+		errors.Is(err, store.ErrEmailTaken), errors.Is(err, store.ErrGroupExists), errors.Is(err, store.ErrLastAdmin),
+		errors.Is(err, store.ErrNotFound):
+		return refuse(http.StatusBadRequest, userError(err))
+	}
+	return s.failResult(c.w, c.r, err)
+}
+
 // formGroups reads the checked group boxes.
 func formGroups(r *http.Request) []string {
 	var out []string
@@ -213,12 +232,12 @@ func formGroups(r *http.Request) []string {
 	return out
 }
 
-func (s *Server) newResetLink(userID uint64) (string, error) {
+func (s *Server) newResetLink(db *store.Store, userID uint64) (string, error) {
 	tok, err := auth.NewToken()
 	if err != nil {
 		return "", err
 	}
-	err = s.store.CreateReset(store.Reset{Hash: auth.HashToken(tok), UserID: userID, ExpiresAt: s.opts.Now().Add(resetLinkTTL)})
+	err = db.CreateReset(store.Reset{Hash: auth.HashToken(tok), UserID: userID, ExpiresAt: s.opts.Now().Add(resetLinkTTL)})
 	return s.authOrigin + pathReset + "/" + tok, err
 }
 
@@ -252,18 +271,18 @@ func (s *Server) adminCreateUser(c *adminCtx) result {
 		}
 	}
 	if err == nil {
-		err = s.store.CreateUser(&u)
+		err = c.db.CreateUser(&u)
 	}
 	if err != nil {
-		return refuse(http.StatusBadRequest, userError(err))
+		return s.adminErr(c, err)
 	}
 	s.audit(r, "admin-user-created", "by", c.a.user.Username, "user", u.Username, "admin", u.Admin)
 	if temp != "" {
 		return done(fmt.Sprintf("Created %s with a temporary password; they must change it at first login.", u.Username))
 	}
-	link, err := s.newResetLink(u.ID)
+	link, err := s.newResetLink(c.db, u.ID)
 	if err != nil {
-		return s.failResult(c.w, r, err)
+		return s.adminErr(c, err)
 	}
 	return result{link: link, linkFor: u.Username}
 }
@@ -286,13 +305,9 @@ func (s *Server) updateTarget(c *adminCtx, event string, fn func(u *store.User) 
 	before := c.target
 	// The acting admin is re-checked in the same transaction, so a change
 	// can't land after their session ended or they were demoted.
-	u, err := s.store.UpdateUserAs(store.Actor{SessionID: c.a.sess.ID, Admin: true}, c.target.ID, fn)
-	if errors.Is(err, store.ErrStaleSession) {
-		http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
-		return handled, false
-	}
+	u, err := c.db.UpdateUser(c.target.ID, fn)
 	if err != nil {
-		return refuse(http.StatusBadRequest, userError(err)), false
+		return s.adminErr(c, err), false
 	}
 	c.target = u
 	s.audit(c.r, event, "by", c.a.user.Username, "user", u.Username)
@@ -302,6 +317,7 @@ func (s *Server) updateTarget(c *adminCtx, event string, fn func(u *store.User) 
 			return handled, false
 		}
 		c.a = na
+		c.db = s.store.As(store.Actor{SessionID: na.sess.ID, Admin: true})
 		if c.a.state != effFull || !u.Admin {
 			http.Redirect(c.w, c.r, pathAccount, http.StatusSeeOther)
 			return handled, false
@@ -317,7 +333,7 @@ func (s *Server) adminSaveUser(c *adminCtx) result {
 		email, err = store.CleanEmail(c.r.PostFormValue("email"))
 	}
 	if err != nil {
-		return refuse(http.StatusBadRequest, userError(err))
+		return s.adminErr(c, err)
 	}
 	groups := formGroups(c.r)
 	admin := c.r.PostFormValue("admin") == "on"
@@ -355,17 +371,17 @@ func (s *Server) adminResetTOTP(c *adminCtx) result {
 }
 
 func (s *Server) adminResetLink(c *adminCtx) result {
-	link, err := s.newResetLink(c.target.ID)
+	link, err := s.newResetLink(c.db, c.target.ID)
 	if err != nil {
-		return s.failResult(c.w, c.r, err)
+		return s.adminErr(c, err)
 	}
 	s.audit(c.r, "admin-reset-link", "by", c.a.user.Username, "user", c.target.Username)
 	return result{link: link}
 }
 
 func (s *Server) adminRevokeSessions(c *adminCtx) result {
-	if err := s.store.DeleteUserSessions(c.target.ID, c.a.sess.ID); err != nil {
-		return s.failResult(c.w, c.r, err)
+	if err := c.db.DeleteUserSessions(c.target.ID, c.a.sess.ID); err != nil {
+		return s.adminErr(c, err)
 	}
 	s.audit(c.r, "admin-sessions-revoked", "by", c.a.user.Username, "user", c.target.Username)
 	return done("Their sessions have ended.")
@@ -378,8 +394,8 @@ func (s *Server) adminDeleteUser(c *adminCtx) result {
 	if c.r.PostFormValue("confirm") != c.target.Username {
 		return refuse(http.StatusBadRequest, "Type the username to confirm.")
 	}
-	if err := s.store.DeleteUser(c.target.ID); err != nil {
-		return refuse(http.StatusBadRequest, userError(err))
+	if err := c.db.DeleteUser(c.target.ID); err != nil {
+		return s.adminErr(c, err)
 	}
 	s.audit(c.r, "admin-user-deleted", "by", c.a.user.Username, "user", c.target.Username)
 	http.Redirect(c.w, c.r, pathAdmin+"/users", http.StatusSeeOther)
@@ -431,19 +447,19 @@ func groupAction(op string) func(*Server, *adminCtx) result {
 		name := strings.TrimSpace(c.r.PostFormValue("name"))
 		desc, err := store.CleanName(c.r.PostFormValue("description"))
 		if err != nil {
-			return refuse(http.StatusBadRequest, userError(err))
+			return s.adminErr(c, err)
 		}
 		g := store.Group{Name: name, Description: desc, RequireTOTP: c.r.PostFormValue("requireTOTP") == "on"}
 		switch op {
 		case "create":
-			err = s.store.CreateGroup(g)
+			err = c.db.CreateGroup(g)
 		case "update":
-			err = s.store.UpdateGroup(g)
+			err = c.db.UpdateGroup(g)
 		case "delete":
-			err = s.store.DeleteGroup(name)
+			err = c.db.DeleteGroup(name)
 		}
 		if err != nil {
-			return refuse(http.StatusBadRequest, userError(err))
+			return s.adminErr(c, err)
 		}
 		s.audit(c.r, "admin-group-"+op, "by", c.a.user.Username, "group", name, "requireTOTP", g.RequireTOTP)
 		return done("Saved.")
@@ -479,19 +495,19 @@ func (s *Server) adminCreateInvite(c *adminCtx) result {
 	}
 	note, err := store.CleanName(c.r.PostFormValue("note"))
 	if err != nil {
-		return refuse(http.StatusBadRequest, userError(err))
+		return s.adminErr(c, err)
 	}
 	tok, err := auth.NewToken()
 	if err != nil {
-		return s.failResult(c.w, c.r, err)
+		return s.adminErr(c, err)
 	}
 	now := s.opts.Now()
 	inv := store.Invite{
 		Hash: auth.HashToken(tok), Groups: formGroups(c.r), Note: note, CreatedBy: c.a.user.Username,
 		CreatedAt: now, ExpiresAt: now.Add(time.Duration(hours) * time.Hour), MaxUses: uses,
 	}
-	if err := s.store.CreateInvite(inv); err != nil {
-		return refuse(http.StatusBadRequest, userError(err))
+	if err := c.db.CreateInvite(inv); err != nil {
+		return s.adminErr(c, err)
 	}
 	s.audit(c.r, "admin-invite-created", "by", c.a.user.Username, "groups", strings.Join(inv.Groups, ","), "uses", uses, "hours", hours)
 	return result{link: s.authOrigin + pathInvite + "/" + url.PathEscape(tok)}
@@ -501,12 +517,12 @@ func (s *Server) adminRevokeInvite(c *adminCtx) result {
 	short := c.r.PostFormValue("invite")
 	invs, err := s.store.Invites()
 	if err != nil {
-		return s.failResult(c.w, c.r, err)
+		return s.adminErr(c, err)
 	}
 	for _, inv := range invs {
 		if len(short) == 8 && strings.HasPrefix(inv.Hash, short) {
-			if err := s.store.DeleteInvite(inv.Hash); err != nil {
-				return s.failResult(c.w, c.r, err)
+			if err := c.db.DeleteInvite(inv.Hash); err != nil {
+				return s.adminErr(c, err)
 			}
 			s.audit(c.r, "admin-invite-revoked", "by", c.a.user.Username)
 		}
@@ -531,6 +547,9 @@ func (s *Server) loadAdminBans(_ *adminCtx, _ result) (any, error) {
 }
 
 func (s *Server) adminUnban(c *adminCtx) result {
+	if err := c.db.CheckActor(); err != nil {
+		return s.adminErr(c, err)
+	}
 	ip := c.r.PostFormValue("ip")
 	s.opts.Banner.Unban(ip)
 	s.ipLimit.Succeed(ip)

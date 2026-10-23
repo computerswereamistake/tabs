@@ -847,35 +847,46 @@ func (s *Store) CreateSession(sess Session) error {
 		return ErrInvalid
 	}
 	return s.update(func(tx *bolt.Tx) error {
-		existing, err := all[Session](tx.Bucket(bSessions))
-		if err != nil {
+		if err := capSessionsTx(tx, sess.UserID, sess.State, ""); err != nil {
 			return err
-		}
-		limit := MaxSessionsPerUser
-		if sess.State == StateTOTPPending {
-			limit = MaxPendingPerUser
-		}
-		var mine []Session
-		for _, x := range existing {
-			if x.UserID == sess.UserID && (x.State == StateTOTPPending) == (sess.State == StateTOTPPending) {
-				mine = append(mine, x)
-			}
-		}
-		if extra := len(mine) - (limit - 1); extra > 0 {
-			slices.SortFunc(mine, func(a, b Session) int { return a.CreatedAt.Compare(b.CreatedAt) })
-			drop := make(map[string]bool, extra)
-			for _, x := range mine[:extra] {
-				drop[x.ID] = true
-			}
-			if err := deleteSessionsTx(tx, func(x Session) bool { return drop[x.ID] }); err != nil {
-				return err
-			}
 		}
 		if err := tx.Bucket(bSessionTokens).Put([]byte(sess.Hash), []byte(sess.ID)); err != nil {
 			return err
 		}
 		return put(tx.Bucket(bSessions), []byte(sess.ID), sess)
 	})
+}
+
+// capSessionsTx makes room for one more session of the given state for
+// userID: it ends that user's oldest sessions of the same kind (pending or
+// full) beyond the cap for that kind, not counting keep (a session being
+// promoted, which is about to become one of them).
+func capSessionsTx(tx *bolt.Tx, userID uint64, state SessionState, keep string) error {
+	existing, err := all[Session](tx.Bucket(bSessions))
+	if err != nil {
+		return err
+	}
+	pending := state == StateTOTPPending
+	limit := MaxSessionsPerUser
+	if pending {
+		limit = MaxPendingPerUser
+	}
+	var mine []Session
+	for _, x := range existing {
+		if x.UserID == userID && x.ID != keep && (x.State == StateTOTPPending) == pending {
+			mine = append(mine, x)
+		}
+	}
+	extra := len(mine) - (limit - 1)
+	if extra <= 0 {
+		return nil
+	}
+	slices.SortFunc(mine, func(a, b Session) int { return a.CreatedAt.Compare(b.CreatedAt) })
+	drop := make(map[string]bool, extra)
+	for _, x := range mine[:extra] {
+		drop[x.ID] = true
+	}
+	return deleteSessionsTx(tx, func(x Session) bool { return drop[x.ID] })
 }
 
 // liveSessionTx loads session id and its user, checking the session hasn't
@@ -1004,8 +1015,16 @@ func (s *Store) RotateSession(id, newHash string, fn func(*Session)) error {
 		if err := tokens.Delete([]byte(sess.Hash)); err != nil {
 			return err
 		}
+		before := sess.State
 		if fn != nil {
 			fn(&sess)
+		}
+		// A pending login becoming full joins the full sessions, so their
+		// cap applies here too, in the same transaction.
+		if before != sess.State {
+			if err := capSessionsTx(tx, sess.UserID, sess.State, id); err != nil {
+				return err
+			}
 		}
 		sess.ID, sess.Hash = id, newHash
 		if err := tokens.Put([]byte(newHash), []byte(id)); err != nil {

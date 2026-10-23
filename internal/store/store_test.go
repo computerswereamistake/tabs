@@ -615,3 +615,30 @@ func TestPendingSessionsDontEvictFull(t *testing.T) {
 		t.Errorf("%d sessions, want %d", len(ss), 1+MaxPendingPerUser)
 	}
 }
+
+// Completing a TOTP login (pending -> full) respects the full-session cap.
+func TestPromotionRespectsSessionCap(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	for i := range MaxSessionsPerUser + 3 {
+		at := now.Add(time.Duration(i) * time.Minute)
+		id := fmt.Sprint("p", i)
+		if err := s.CreateSession(Session{ID: id, Hash: "h" + id, UserID: u.ID, State: StateTOTPPending, AuthEpoch: u.AuthEpoch, CreatedAt: at, LastSeen: at, ExpiresAt: at.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RotateSession(id, "r"+id, func(x *Session) { x.State = StateFull }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ss, _ := s.UserSessions(u.ID)
+	if len(ss) != MaxSessionsPerUser {
+		t.Fatalf("%d sessions after promotions, want %d", len(ss), MaxSessionsPerUser)
+	}
+	if _, _, err := s.SessionByID("p0", now, 0); err == nil {
+		t.Error("oldest full session kept")
+	}
+	last := fmt.Sprint("p", MaxSessionsPerUser+2)
+	if _, _, err := s.SessionByToken("r"+last, now, 0); err != nil {
+		t.Errorf("just-promoted session lost: %v", err)
+	}
+}

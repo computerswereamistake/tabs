@@ -917,8 +917,8 @@ func TestSecurityHeaders(t *testing.T) {
 		{portalBase + "/", portalCSP, "same-origin"},
 		{portalBase + "/_tabs/static/app.css", portalCSP, "same-origin"},
 		{portalBase + "/nope", portalCSP, "same-origin"},
-		{authBase + pathLogin, authCSP, "no-referrer"},
-		{authBase + "/nope", authCSP, "no-referrer"},
+		{authBase + pathLogin, authCSP, "same-origin"},
+		{authBase + "/nope", authCSP, "same-origin"},
 	} {
 		rr := b.request("GET", tt.url, nil, nil)
 		h := rr.Header()
@@ -1375,5 +1375,45 @@ func TestUserBackoffSparesCleanAddresses(t *testing.T) {
 	}
 	if rr := e.browser().login("alice", "password-for-alice"); rr.Code != http.StatusOK {
 		t.Errorf("real user locked out from a clean address: %d", rr.Code)
+	}
+}
+
+// A browser that sends "Origin: null" (or none) on a same-origin form post
+// is still let in by its Sec-Fetch-Site; anything else without an Origin
+// is refused. Regression: no-referrer on the auth host made real browsers
+// send "Origin: null", so every form failed.
+func TestOriginNullSameOriginPost(t *testing.T) {
+	e := newEnv(t)
+	e.user("bob", false)
+	form := url.Values{"username": {"bob"}, "password": {"password-for-bob"}}
+	for _, tt := range []struct {
+		name   string
+		hdr    map[string]string
+		wantOK bool
+	}{
+		{"null origin, same-origin fetch", map[string]string{"Origin": "null", "Sec-Fetch-Site": "same-origin"}, true},
+		{"no origin, same-origin fetch", map[string]string{"Origin": "", "Sec-Fetch-Site": "same-origin"}, true},
+		{"null origin, cross-site", map[string]string{"Origin": "null", "Sec-Fetch-Site": "cross-site"}, false},
+		{"null origin, same-site", map[string]string{"Origin": "null", "Sec-Fetch-Site": "same-site"}, false},
+		{"null origin, no fetch metadata", map[string]string{"Origin": "null"}, false},
+		{"no origin at all", map[string]string{"Origin": ""}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := e.browser().request("POST", authBase+pathLogin, form, tt.hdr)
+			if ok := rr.Code != http.StatusForbidden; ok != tt.wantOK {
+				t.Errorf("status = %d, want accepted=%v", rr.Code, tt.wantOK)
+			}
+		})
+	}
+	// The fallback still only vouches for the allowed origins.
+	req := httptest.NewRequest(http.MethodPost, "https://elsewhere.example.com/", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	if sameOrigin(req, authBase) {
+		t.Error("null-Origin fallback accepted a host that isn't allowed")
+	}
+	// The page itself must not ask for no-referrer, which causes Origin: null.
+	rr := e.browser().request("GET", authBase+pathLogin, nil, nil)
+	if strings.Contains(rr.Body.String(), `content="no-referrer"`) || rr.Header().Get("Referrer-Policy") == "no-referrer" {
+		t.Error("auth pages still use no-referrer")
 	}
 }

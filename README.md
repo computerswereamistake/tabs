@@ -319,10 +319,15 @@ other.example.com {                       # a tab with url: https://other.exampl
   ```caddyfile
   log {
   	format filter {
-  		request>uri regexp "(/_tabs/(?:invite|reset)/)[^?]*|([?&](?:token|code|state)=)[^&]*" "${1}${2}REDACTED"
+  		request>uri regexp "(/_tabs/(?:invite|reset)/)[^?]*|([?&](?:token|code|state)=)[^&]*|(%26(?:token|code|state)%3D)[^%&]*" "${1}${2}${3}REDACTED"
+  		request>headers>Referer delete
   	}
   }
   ```
+
+  The last regexp group covers the copy of the sign-in URL encoded in a
+  login page's `next=`, and `Referer` is dropped because auth-host pages
+  send same-origin referrers that can contain those URLs.
 - Don't give two tabs with different `groups` the same upstream: the gate
   is only as precise as Caddy's path matching.
 - Framed apps that send `X-Frame-Options: DENY` or a restrictive

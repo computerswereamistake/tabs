@@ -506,7 +506,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveVerify(rec, r, st)
 	case host == s.authHost:
 		h.Set("Content-Security-Policy", st.authCSP)
-		h.Set("Referrer-Policy", "no-referrer")
+		// Not no-referrer: with that, browsers send "Origin: null" on form
+		// posts, which the CSRF check refuses. Link tokens are moved out of
+		// the URL on first visit, so same-origin referrers carry none.
+		h.Set("Referrer-Policy", "same-origin")
 		s.routeAuth(rec, r, st)
 	case host == s.portalHost:
 		h.Set("Content-Security-Policy", st.portalCSP)

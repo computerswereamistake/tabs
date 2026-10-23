@@ -246,14 +246,19 @@ func viewerOf(u store.User) tabs.Viewer {
 
 // --- forms and CSRF ---
 
-// sameOrigin reports whether a POST's Origin is one of allowed. A missing
-// Origin is refused: every browser this app supports sends it on POST.
+// sameOrigin reports whether a POST comes from one of the allowed origins:
+// by its Origin header, or, when the browser sent none (or "null"), by a
+// browser-set Sec-Fetch-Site of same-origin. With neither, it's refused.
 func sameOrigin(r *http.Request, allowed ...string) bool {
+	sfs := r.Header.Get("Sec-Fetch-Site")
 	o := r.Header.Get("Origin")
 	if o == "" || o == "null" {
-		return false
+		// Some browsers and privacy settings send no Origin, or "null", on
+		// a same-origin form post. Sec-Fetch-Site is set by the browser and
+		// can't be forged by a web page, so a same-origin one is enough.
+		return sfs == "same-origin"
 	}
-	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "same-site" && sfs != "none" {
+	if sfs != "" && sfs != "same-origin" && sfs != "same-site" && sfs != "none" {
 		return false
 	}
 	return slices.Contains(allowed, o)

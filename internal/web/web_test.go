@@ -1405,6 +1405,12 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 			}
 		})
 	}
+	// The fallback still only vouches for the allowed origins.
+	req := httptest.NewRequest(http.MethodPost, "https://elsewhere.example.com/", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	if sameOrigin(req, authBase) {
+		t.Error("null-Origin fallback accepted a host that isn't allowed")
+	}
 	// The page itself must not ask for no-referrer, which causes Origin: null.
 	rr := e.browser().request("GET", authBase+pathLogin, nil, nil)
 	if strings.Contains(rr.Body.String(), `content="no-referrer"`) || rr.Header().Get("Referrer-Policy") == "no-referrer" {

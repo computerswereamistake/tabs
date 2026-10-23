@@ -255,8 +255,14 @@ func sameOrigin(r *http.Request, allowed ...string) bool {
 	if o == "" || o == "null" {
 		// Some browsers and privacy settings send no Origin, or "null", on
 		// a same-origin form post. Sec-Fetch-Site is set by the browser and
-		// can't be forged by a web page, so a same-origin one is enough.
-		return sfs == "same-origin"
+		// can't be forged by a web page, so a same-origin one is enough,
+		// as long as the request's own host is one of the allowed origins.
+		// (A non-browser client can send any header, but it has no
+		// victim's cookies, so that isn't CSRF.)
+		if sfs != "same-origin" {
+			return false
+		}
+		return slices.Contains(allowed, "https://"+r.Host) || slices.Contains(allowed, "http://"+r.Host)
 	}
 	if sfs != "" && sfs != "same-origin" && sfs != "same-site" && sfs != "none" {
 		return false

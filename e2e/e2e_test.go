@@ -4,6 +4,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -77,7 +79,17 @@ func TestSignupInBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup link: %v", err)
 	}
-	cmd := exec.Command(node, "signup.mjs")
+	ctx := t.Context()
+	if deadline, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-10*time.Second))
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, node, "signup.mjs")
+	// On the deadline, ask nicely first, so the script can shut Chrome
+	// down; kill it outright only if it doesn't exit.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(os.Environ(), "CHROME="+chrome, "AUTH="+auth, "PORTAL="+portal, "SETUP="+strings.TrimSpace(string(setup)))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

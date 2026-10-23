@@ -43,10 +43,12 @@ function launchChrome() {
         resolve({
           ws: m[1],
           close: () => new Promise((done) => {
-            proc.once("exit", () => {
+            const cleanup = () => {
               rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
               done();
-            });
+            };
+            if (proc.exitCode !== null || proc.signalCode !== null) return cleanup(); // already gone
+            proc.once("exit", cleanup);
             proc.kill();
           }),
         });
@@ -68,6 +70,11 @@ class CDP {
       this.ws.onopen = resolve;
       this.ws.onerror = reject;
     });
+    // If Chrome goes away, fail every call in flight rather than hang.
+    this.ws.onclose = () => {
+      for (const { reject } of this.pending.values()) reject(new Error("DevTools connection closed"));
+      this.pending.clear();
+    };
     this.ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.id && this.pending.has(msg.id)) {
@@ -81,10 +88,19 @@ class CDP {
     };
   }
 
-  send(method, params = {}, sessionId) {
+  send(method, params = {}, sessionId, timeoutMs = 20000) {
     const id = ++this.nextID;
     this.ws.send(JSON.stringify({ id, method, params, sessionId }));
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`timed out waiting for ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+    });
   }
 
   // once resolves on the next event named method for sessionId.
@@ -166,6 +182,11 @@ class Page {
 }
 
 const chrome = await launchChrome();
+// If the Go test runs out of time it sends SIGTERM: don't leave Chrome behind.
+process.on("SIGTERM", async () => {
+  await chrome.close();
+  process.exit(1);
+});
 const cdp = new CDP(chrome.ws);
 await cdp.ready;
 let failed = false;

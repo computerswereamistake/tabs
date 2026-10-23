@@ -428,8 +428,12 @@ The first release, with no tag yet, is `v0.1.0`. With squash merges, the PR
 title is the commit message that counts. A hand-pushed `v*` tag still
 publishes too.
 
-A release publishes `ghcr.io/computerswereamistake/tabs:0.1.0` (plus `0.1` and
-a `sha-…` tag). New GHCR packages start private; make it public, or give the
+A release publishes `ghcr.io/computerswereamistake/tabs:1.2.3`, plus `1.2`,
+`1`, `latest` and a `sha-…` tag. `latest`, `1` and `1.2` only ever move
+forward to newer releases; a hand-pushed `v*` tag (a backport, say) only
+gets its exact version tag. To auto-update with Watchtower without
+taking breaking changes, run the major tag (`:1`): it follows every 1.x
+release and never jumps to 2.0. New GHCR packages start private; make it public, or give the
 deploy host a read token, in the package settings. Actions are pinned to
 commit SHAs and base images to digests; Dependabot proposes updates weekly.
 

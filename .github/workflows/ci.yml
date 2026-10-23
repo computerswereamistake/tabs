@@ -67,6 +67,8 @@ jobs:
     outputs:
       version: ${{ steps.next.outputs.version }}
       minor: ${{ steps.next.outputs.minor }}
+      major: ${{ steps.next.outputs.major }}
+      floating: ${{ steps.next.outputs.floating }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,6 +81,16 @@ jobs:
           echo "Next version: ${v:-none}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "minor=${v%.*}" >> "$GITHUB_OUTPUT"
+          echo "major=${v%%.*}" >> "$GITHUB_OUTPUT"
+          # The floating tags (latest, X, X.Y) only move forward: if a
+          # higher release already exists (say this is a re-run of an
+          # older commit whose tag never got pushed), leave them alone.
+          highest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -n1)
+          if [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "${highest:-0.0.0}" | sort -V | tail -n1)" = "$v" ]; then
+            echo "floating=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "floating=false" >> "$GITHUB_OUTPUT"
+          fi
 
   image:
     needs: [test, version]
@@ -109,13 +121,18 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
-          # semver entries cover hand-pushed v* tags; raw ones a release
-          # computed on main.
+          # latest and the major tag (e.g. 1, for Watchtower: every 1.x,
+          # never a breaking 2.0) follow releases cut on main, and only move
+          # forward. A hand-pushed v* tag (maybe a backport) gets only its
+          # exact version tag, so it never moves latest, X or X.Y.
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=${{ needs.version.outputs.version }},enable=${{ needs.version.outputs.version != '' }}
-            type=raw,value=${{ needs.version.outputs.minor }},enable=${{ needs.version.outputs.version != '' }}
+            type=raw,value=${{ needs.version.outputs.minor }},enable=${{ needs.version.outputs.floating == 'true' }}
+            type=raw,value=${{ needs.version.outputs.major }},enable=${{ needs.version.outputs.floating == 'true' }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.floating == 'true' }}
             type=sha
 
       # Every run builds both architectures; only releases push.

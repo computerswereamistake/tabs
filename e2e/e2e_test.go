@@ -23,12 +23,18 @@ import (
 // stop running. TABS_E2E_CHROME overrides where Chrome is found.
 func TestSignupInBrowser(t *testing.T) {
 	node, err := exec.LookPath("node")
+	if err == nil {
+		// The script needs Node's built-in WebSocket (Node 22+).
+		if exec.Command(node, "-e", "process.exit(typeof WebSocket === 'function' ? 0 : 1)").Run() != nil {
+			err = fmt.Errorf("%s has no built-in WebSocket; Node 22 or newer is needed", node)
+		}
+	}
 	chrome := findChrome()
 	if err != nil || chrome == "" {
 		if os.Getenv("CI") != "" {
-			t.Fatalf("node and Chrome are required in CI (node: %v, chrome: %q)", err, chrome)
+			t.Fatalf("Node 22+ and Chrome are required in CI (node: %v, chrome: %q)", err, chrome)
 		}
-		t.Skip("node or Chrome not installed; skipping the browser test")
+		t.Skipf("skipping the browser test: needs Node 22+ and Chrome (node: %v, chrome: %q)", err, chrome)
 	}
 
 	dir := t.TempDir()

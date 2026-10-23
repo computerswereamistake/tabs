@@ -19,12 +19,32 @@ const { CHROME, AUTH, PORTAL, SETUP } = process.env;
 const ADMIN_PW = "admin password for e2e";
 const GUEST_PW = "guest password for e2e";
 
+// The running Chrome and its profile directory, recorded the moment it's
+// spawned so that every exit path (success, failure, a launch that never
+// finishes, SIGTERM) can clean up through stopChrome.
+let chromeProc, chromeDir;
+
+function stopChrome() {
+  return new Promise((done) => {
+    const cleanup = () => {
+      if (chromeDir) rmSync(chromeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      chromeDir = undefined;
+      done();
+    };
+    // No pid means the spawn itself failed (bad path): nothing to kill.
+    if (!chromeProc?.pid || chromeProc.exitCode !== null || chromeProc.signalCode !== null) return cleanup();
+    chromeProc.once("exit", cleanup);
+    chromeProc.kill();
+  });
+}
+
+// launchChrome starts headless Chrome and resolves to its DevTools URL.
 function launchChrome() {
-  const dir = mkdtempSync(join(tmpdir(), "tabs-e2e-chrome-"));
-  const proc = spawn(CHROME, [
+  chromeDir = mkdtempSync(join(tmpdir(), "tabs-e2e-chrome-"));
+  chromeProc = spawn(CHROME, [
     "--headless=new",
     "--remote-debugging-port=0",
-    `--user-data-dir=${dir}`,
+    `--user-data-dir=${chromeDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--no-sandbox", // CI runners and containers
@@ -35,26 +55,13 @@ function launchChrome() {
   return new Promise((resolve, reject) => {
     let log = "";
     const timer = setTimeout(() => reject(new Error(`Chrome didn't start:\n${log}`)), 30000);
-    proc.stderr.on("data", (d) => {
+    chromeProc.stderr.on("data", (d) => {
       log += d;
       const m = log.match(/DevTools listening on (ws:\/\/\S+)/);
-      if (m) {
-        clearTimeout(timer);
-        resolve({
-          ws: m[1],
-          close: () => new Promise((done) => {
-            const cleanup = () => {
-              rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-              done();
-            };
-            if (proc.exitCode !== null || proc.signalCode !== null) return cleanup(); // already gone
-            proc.once("exit", cleanup);
-            proc.kill();
-          }),
-        });
-      }
+      if (m) { clearTimeout(timer); resolve(m[1]); }
     });
-    proc.on("exit", (code) => reject(new Error(`Chrome exited (${code}):\n${log}`)));
+    chromeProc.on("exit", (code) => { clearTimeout(timer); reject(new Error(`Chrome exited (${code}):\n${log}`)); });
+    chromeProc.on("error", (err) => { clearTimeout(timer); reject(new Error(`can't start Chrome (${CHROME}): ${err.message}`)); });
   });
 }
 
@@ -181,16 +188,17 @@ class Page {
   }
 }
 
-const chrome = await launchChrome();
+let cdp;
 // If the Go test runs out of time it sends SIGTERM: don't leave Chrome behind.
 process.on("SIGTERM", async () => {
-  await chrome.close();
+  await stopChrome();
   process.exit(1);
 });
-const cdp = new CDP(chrome.ws);
-await cdp.ready;
 let failed = false;
 try {
+  cdp = new CDP(await launchChrome());
+  await cdp.ready;
+
   // 1. The first admin, from the setup link.
   const admin = await Page.open(cdp);
   let st = await admin.goto(SETUP);
@@ -244,7 +252,7 @@ try {
   failed = true;
   console.error(err);
 } finally {
-  cdp.ws.close();
-  await chrome.close();
+  cdp?.ws.close();
+  await stopChrome();
 }
 process.exit(failed ? 1 : 0);

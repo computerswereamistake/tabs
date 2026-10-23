@@ -1,0 +1,42 @@
+{{define "content"}}
+{{- $d := .Data}}
+{{- with $d.Missing}}
+<p class="alert alert-error">Tabs in the config use groups that don't exist yet, so nobody can see those tabs: {{range $i, $g := .}}{{if $i}}, {{end}}<code>{{$g}}</code>{{end}}.</p>
+{{- end}}
+<section class="card">
+  <table>
+    <thead><tr><th>Group</th><th>Members</th><th>Tabs</th><th>Settings</th></tr></thead>
+    <tbody>
+    {{- range $d.Groups}}
+    <tr>
+      <td><code>{{.Name}}</code></td>
+      <td>{{.Members}}</td>
+      <td>{{range $i, $t := .Tabs}}{{if $i}}, {{end}}{{$t}}{{else}}<span class="muted">none</span>{{end}}</td>
+      <td>
+        <form method="post" action="/_tabs/admin/groups" class="row">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <input name="description" maxlength="100" value="{{.Description}}" placeholder="Description" aria-label="Description">
+          <label class="check"><input type="checkbox" name="requireTOTP"{{if .RequireTOTP}} checked{{end}}> Require two-factor</label>
+          <button type="submit" name="action" value="update">Save</button>
+          <button type="submit" name="action" value="delete" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {{- end}}
+    </tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>New group</h2>
+  <form method="post" action="/_tabs/admin/groups" class="stack">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="create">
+    <label>Name <input name="name" required maxlength="64" pattern="[a-z0-9\-]+">
+      <small>Lowercase letters, digits and dashes, as used in a tab's <code>groups:</code>.</small></label>
+    <label>Description <input name="description" maxlength="100"></label>
+    <label class="check"><input type="checkbox" name="requireTOTP"> Require two-factor login for members</label>
+    <button type="submit">Create group</button>
+  </form>
+</section>
+{{end}}

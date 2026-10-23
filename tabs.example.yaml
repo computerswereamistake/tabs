@@ -1,6 +1,5 @@
 # Example config. Copy to /config/tabs.yaml (or set TABS_CONFIG) and edit.
 title: Media
-logoutURL: https://auth.example.com/logout
 tabs:
   # Same-origin app served under a subpath of the host this app runs on.
   - slug: app-one
@@ -19,7 +18,7 @@ tabs:
     url: https://other.example.com/
     icon: other.svg
     groups: [admins]
-  # No groups: visible to every authenticated viewer. No icon: shows an initial.
+  # No groups: visible to every logged-in user. No icon: shows an initial.
   - slug: docs
     name: Docs
     url: /docs/

@@ -1,0 +1,37 @@
+{{define "content"}}
+{{- $d := .Data}}
+<section class="card">
+  <h2>Banned addresses</h2>
+  <p class="muted">Addresses with too many failed logins or codes. Bans expire on their own and are forgotten on restart.</p>
+  <table>
+    <thead><tr><th>Address</th><th>Until</th><th></th></tr></thead>
+    <tbody>
+    {{- range $d.Bans}}
+    <tr>
+      <td><code>{{.IP}}</code></td><td>{{when .Until}}</td>
+      <td>
+        <form method="post" action="/_tabs/admin/bans" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="action" value="unban">
+          <input type="hidden" name="ip" value="{{.IP}}">
+          <button type="submit" class="link">Lift</button>
+        </form>
+      </td>
+    </tr>
+    {{- else}}
+    <tr><td colspan="3" class="muted">None.</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>Locked accounts</h2>
+  <ul>
+  {{- range $d.Locked}}
+    <li><a href="/_tabs/admin/users/{{.ID}}">{{.Username}}</a></li>
+  {{- else}}
+    <li class="muted">None.</li>
+  {{- end}}
+  </ul>
+</section>
+{{end}}

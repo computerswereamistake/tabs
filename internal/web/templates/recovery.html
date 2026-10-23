@@ -1,0 +1,9 @@
+{{define "content"}}
+<p>Save these recovery codes somewhere safe, such as a password manager. Each one works once if you lose your authenticator. <strong>They won't be shown again.</strong></p>
+<ul class="codes">
+  {{- range .Data.Codes}}
+  <li><code>{{.}}</code></li>
+  {{- end}}
+</ul>
+<p><a class="button" href="{{.Data.Next}}">I've saved them</a></p>
+{{end}}

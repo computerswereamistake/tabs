@@ -1,7 +1,6 @@
 package tabs
 
 import (
-	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -66,37 +65,42 @@ func TestVisibleTo(t *testing.T) {
 	}
 }
 
-func TestNewViewer(t *testing.T) {
-	tests := []struct {
-		name               string
-		user, dname, group string
-		want               Viewer
-		err                error
-	}{
-		{"groups with spaces", "bob", "Bob", "users, admins", Viewer{"bob", "Bob", []string{"users", "admins"}}, nil},
-		{"trailing commas", "bob", "", "users,,admins,", Viewer{"bob", "bob", []string{"users", "admins"}}, nil},
-		{"empty groups", "bob", "Bob", "", Viewer{"bob", "Bob", nil}, nil},
-		{"only commas", "bob", "Bob", " , ,", Viewer{"bob", "Bob", nil}, nil},
-		{"missing user", "", "Bob", "users", Viewer{}, ErrNoUser},
-		{"blank user", "  ", "Bob", "users", Viewer{}, ErrNoUser},
+func TestCanonicalHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"App.Example.com":       "app.example.com",
+		"app.example.com.":      "app.example.com",
+		"app.example.com:443":   "app.example.com",
+		"app.example.com:8443":  "app.example.com:8443",
+		"app.example.com:":      "",
+		"app.example.com:x":     "",
+		"b.example.com@evil":    "",
+		"b.example.com/x":       "",
+		"[::1]:8080":            "",
+		"":                      "",
+		"app.example.com:99999": "",
+	} {
+		if got := CanonicalHost(in); got != want {
+			t.Errorf("CanonicalHost(%q) = %q, want %q", in, got, want)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewViewer(tt.user, tt.dname, tt.group)
-			if !errors.Is(err, tt.err) {
-				t.Fatalf("err = %v, want %v", err, tt.err)
-			}
-			if got.User != tt.want.User || got.Name != tt.want.Name || !slices.Equal(got.Groups, tt.want.Groups) {
-				t.Errorf("got %+v, want %+v", got, tt.want)
-			}
-		})
+}
+
+func TestTabHostAndLookup(t *testing.T) {
+	c := validConfig()
+	if tab, ok := c.Tab("two"); !ok || tab.Host() != "two.example.com" {
+		t.Errorf("Tab(two) = %+v %v", tab, ok)
+	}
+	if tab, _ := c.Tab("app-one"); tab.Host() != "" {
+		t.Errorf("same-origin tab host = %q", tab.Host())
+	}
+	if _, ok := c.Tab("nope"); ok {
+		t.Error("found a missing tab")
 	}
 }
 
 func validConfig() Config {
 	return Config{
-		Title:     "Media",
-		LogoutURL: "https://auth.example.com/logout",
+		Title: "Media",
 		Tabs: []Tab{
 			{Slug: "app-one", Name: "App One", URL: "/one/", Icon: "one.svg"},
 			{Slug: "two", Name: "Two", URL: "https://two.example.com/", Icon: "two.png", Groups: []string{"users"}},
@@ -128,7 +132,9 @@ func TestValidate(t *testing.T) {
 		{"icon with slash", func(c *Config) { c.Tabs[0].Icon = "sub/one.svg" }},
 		{"icon with dotdot", func(c *Config) { c.Tabs[0].Icon = "..one.svg" }},
 		{"icon with backslash", func(c *Config) { c.Tabs[0].Icon = `a\b.svg` }},
-		{"bad logout url", func(c *Config) { c.LogoutURL = "javascript:alert(1)" }},
+		{"logout url (no longer used)", func(c *Config) { c.LogoutURL = "/logout" }},
+		{"uppercase group", func(c *Config) { c.Tabs[1].Groups = []string{"Users"} }},
+		{"group with space", func(c *Config) { c.Tabs[1].Groups = []string{"media users"} }},
 		{"wildcard host", func(c *Config) { c.Tabs[1].URL = "https://*.example.com/" }},
 		{"comma in host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com,evil/" }},
 		{"semicolon in host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com;img-src/" }},
@@ -159,7 +165,6 @@ func TestValidateAccepts(t *testing.T) {
 		{"uppercase icon extension", func(c *Config) { c.Tabs[0].Icon = "ONE.PNG" }},
 		{"host with port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:8443/x/" }},
 		{"path starting with _tabs-like name", func(c *Config) { c.Tabs[0].URL = "/_tabsish/" }},
-		{"logout on same origin", func(c *Config) { c.LogoutURL = "/logout" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -198,7 +203,6 @@ func TestLoadExample(t *testing.T) {
 func TestParse(t *testing.T) {
 	good := `
 title: Media
-logoutURL: https://auth.example.com/logout
 tabs:
   - slug: one
     name: One

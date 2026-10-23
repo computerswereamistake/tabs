@@ -1,0 +1,40 @@
+{{define "newuser"}}
+  <label>Username
+    <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" value="{{.Username}}">
+    <small>Letters, digits, dot, underscore and dash. Not case-sensitive.</small>
+  </label>
+  <label>Display name
+    <input name="name" autocomplete="name" maxlength="100" value="{{.Name}}">
+  </label>
+  {{- if .AskEmail}}
+  <label>Email (optional)
+    <input type="email" name="email" autocomplete="email" maxlength="254" value="{{.Email}}">
+  </label>
+  {{- end}}
+  <label>Password
+    <input type="password" name="password" autocomplete="new-password" required minlength="{{.MinPasswordLen}}" maxlength="256">
+    <small>At least {{.MinPasswordLen}} characters.</small>
+  </label>
+  <label>Confirm password
+    <input type="password" name="confirm" autocomplete="new-password" required minlength="{{.MinPasswordLen}}" maxlength="256">
+  </label>
+{{end}}
+
+{{define "group-boxes"}}
+<fieldset>
+  <legend>Groups</legend>
+  {{- range .Groups}}
+  <label class="check"><input type="checkbox" name="groups" value="{{.Name}}"{{if has $.Checked .Name}} checked{{end}}> {{.Name}}{{if .RequireTOTP}} <span class="muted">(two-factor required)</span>{{end}}</label>
+  {{- else}}
+  <p class="muted">No groups yet. <a href="/_tabs/admin/groups">Create one</a>.</p>
+  {{- end}}
+</fieldset>
+{{end}}
+
+{{define "user-action"}}
+<form method="post" action="/_tabs/admin/users/{{.ID}}" class="inline">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="action" value="{{.Action}}">
+  <button type="submit">{{.Label}}</button>
+</form>
+{{end}}

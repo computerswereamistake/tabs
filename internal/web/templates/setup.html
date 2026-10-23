@@ -1,0 +1,7 @@
+{{define "content"}}
+<p>No accounts exist yet. Create the first admin.</p>
+<form method="post" action="/_tabs/setup" class="stack">
+  {{template "newuser" .Data}}
+  <button type="submit">Create admin</button>
+</form>
+{{end}}

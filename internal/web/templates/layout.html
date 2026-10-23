@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>{{.Heading}} · {{.Site}}</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/_tabs/static/app.css">
+</head>
+<body class="auth">
+<div class="auth-shell">
+  <header class="auth-head">
+    <a class="auth-site" href="{{.Portal}}">{{.Site}}</a>
+    {{- with .Me}}
+    <nav class="auth-nav" aria-label="Account">
+      <a href="/_tabs/account">Account</a>
+      {{- if .Admin}}
+      <a href="/_tabs/admin/users">Users</a>
+      <a href="/_tabs/admin/groups">Groups</a>
+      <a href="/_tabs/admin/invites">Invites</a>
+      <a href="/_tabs/admin/bans">Bans</a>
+      {{- end}}
+      <form method="post" action="/_tabs/logout" class="inline">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button type="submit" class="link">Log out</button>
+      </form>
+    </nav>
+    {{- end}}
+  </header>
+  <main class="auth-main">
+    <h1>{{.Heading}}</h1>
+    {{- with .Error}}<p class="alert alert-error" role="alert">{{.}}</p>{{end}}
+    {{- with .Notice}}<p class="alert alert-ok" role="status">{{.}}</p>{{end}}
+    {{template "content" .}}
+  </main>
+</div>
+</body>
+</html>

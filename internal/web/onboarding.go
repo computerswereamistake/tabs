@@ -131,7 +131,13 @@ func (s *Server) serveSetup(w http.ResponseWriter, r *http.Request, st *state) {
 		show(http.StatusBadRequest, d, formError(err))
 		return
 	}
-	if u.PasswordHash, err = auth.HashPassword(pw); err != nil {
+	release, ok := s.hashBudget(w, r)
+	if !ok {
+		return
+	}
+	u.PasswordHash, err = auth.HashPassword(pw)
+	release()
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -186,7 +192,19 @@ func (s *Server) serveInvite(w http.ResponseWriter, r *http.Request, st *state) 
 	// Emails are sent to apps, which may match accounts on them, so an
 	// invitee can't choose one; an admin can add it later.
 	u.Email = ""
-	if u.PasswordHash, err = auth.HashPassword(pw); err != nil {
+	// Refuse a taken name before hashing: hashing is the expensive step,
+	// and this form needs nothing but an invite link.
+	if _, err := s.store.UserByName(u.Username); err == nil {
+		show(http.StatusBadRequest, d, userError(store.ErrUsernameTaken))
+		return
+	}
+	release, ok := s.hashBudget(w, r, "invite:"+inv.Hash)
+	if !ok {
+		return
+	}
+	u.PasswordHash, err = auth.HashPassword(pw)
+	release()
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -256,7 +274,12 @@ func (s *Server) serveReset(w http.ResponseWriter, r *http.Request, st *state) {
 		show(http.StatusBadRequest, userError(err))
 		return
 	}
+	release, ok := s.hashBudget(w, r, "reset:"+rs.Hash)
+	if !ok {
+		return
+	}
 	hash, err := auth.HashPassword(pw)
+	release()
 	if err != nil {
 		s.fail(w, r, err)
 		return

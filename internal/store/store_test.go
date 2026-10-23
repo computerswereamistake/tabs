@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -567,5 +568,50 @@ func TestAsRequiresAdmin(t *testing.T) {
 	}
 	if err := s.As(Actor{SessionID: "b"}).CheckActor(); err != nil {
 		t.Errorf("non-admin self actor: %v", err)
+	}
+}
+
+// F3: sessions per user are capped; the oldest go first.
+func TestSessionCap(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	other := mustUser(t, s, "bob", false)
+	_ = s.CreateSession(Session{ID: "bob", Hash: "hb", UserID: other.ID, State: StateFull, AuthEpoch: other.AuthEpoch, CreatedAt: now, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	for i := range MaxSessionsPerUser + 5 {
+		at := now.Add(time.Duration(i) * time.Minute)
+		if err := s.CreateSession(Session{ID: fmt.Sprint("s", i), Hash: fmt.Sprint("h", i), UserID: u.ID, State: StateFull, AuthEpoch: u.AuthEpoch, CreatedAt: at, LastSeen: at, ExpiresAt: at.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ss, _ := s.UserSessions(u.ID)
+	if len(ss) != MaxSessionsPerUser {
+		t.Fatalf("%d sessions kept", len(ss))
+	}
+	if _, _, err := s.SessionByID("s0", now, 0); err == nil {
+		t.Error("oldest session kept")
+	}
+	if _, _, err := s.SessionByID(fmt.Sprint("s", MaxSessionsPerUser+4), now, 0); err != nil {
+		t.Error("newest session dropped")
+	}
+	if bs, _ := s.UserSessions(other.ID); len(bs) != 1 {
+		t.Error("another user's session dropped")
+	}
+}
+
+// Half-finished logins can't push out real sessions.
+func TestPendingSessionsDontEvictFull(t *testing.T) {
+	s := open(t)
+	u := mustUser(t, s, "alice", false)
+	_ = s.CreateSession(Session{ID: "real", Hash: "hr", UserID: u.ID, State: StateFull, AuthEpoch: u.AuthEpoch, CreatedAt: now, LastSeen: now, ExpiresAt: now.Add(time.Hour)})
+	for i := range MaxSessionsPerUser + 5 {
+		at := now.Add(time.Duration(i+1) * time.Second)
+		_ = s.CreateSession(Session{ID: fmt.Sprint("p", i), Hash: fmt.Sprint("hp", i), UserID: u.ID, State: StateTOTPPending, AuthEpoch: u.AuthEpoch, CreatedAt: at, LastSeen: at, ExpiresAt: at.Add(5 * time.Minute)})
+	}
+	if _, _, err := s.SessionByID("real", now, 0); err != nil {
+		t.Fatal("password-only logins pushed out a real session")
+	}
+	ss, _ := s.UserSessions(u.ID)
+	if len(ss) != 1+MaxPendingPerUser {
+		t.Errorf("%d sessions, want %d", len(ss), 1+MaxPendingPerUser)
 	}
 }

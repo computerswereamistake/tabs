@@ -28,10 +28,14 @@ const badLogin = "Wrong username or password."
 // with status 429). When it returns false the caller holds a check slot
 // for ip and must call s.release(ip) when done.
 //
-// Per address, at most maxInFlight checks run at once. Per username there
-// is no such hard cap (that would let anyone hold a user's slots and lock
-// them out); instead each attempt is counted as a failure before it runs,
-// in the same step as the limit check, and a success clears it.
+// Per address, at most maxInFlight checks run at once, and every check
+// (successful or not) spends from the address's hash rate. Per
+// username there is no hard cap (that would let anyone hold a user's slots
+// and lock them out); instead each attempt is counted as a failure before
+// it runs, in the same step as the limit check, and a success clears it.
+// That per-username backoff only applies to addresses that have already
+// failed for this user: otherwise a few addresses trickling wrong
+// passwords could keep the real user, from their own address, out.
 func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip string, render func(msg string)) bool {
 	if banned, until := s.opts.Banner.Banned(ip); banned {
 		s.audit(r, "banned-attempt", "user", name)
@@ -49,12 +53,17 @@ func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip stri
 			return true
 		}
 	}
+	if ok, wait := s.hashLimit.Take(ip); !ok {
+		w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
+		render(fmt.Sprintf("Too many attempts. Try again in %s.", wait.Round(time.Second)))
+		return true
+	}
 	if !s.acquire(ip) {
 		w.Header().Set("Retry-After", "2")
 		render("Too many attempts at once. Try again in a moment.")
 		return true
 	}
-	if ok, wait := s.userLimit.Take(name); !ok {
+	if ok, wait := s.userLimit.Take(name); !ok && s.pairLimit.Has(ip+"|"+name) {
 		s.release(ip)
 		w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
 		render(fmt.Sprintf("Too many attempts. Try again in %s.", wait.Round(time.Second)))

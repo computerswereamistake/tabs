@@ -110,6 +110,9 @@ type Server struct {
 	authOrigin, portal   string
 
 	pairLimit, userLimit, ipLimit *auth.Limiter
+	// hashLimit rate-limits password hashes per address (and per invite),
+	// successful or not: hashing is the expensive, globally limited step.
+	hashLimit *auth.Bucket
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -159,6 +162,7 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 	s.pairLimit = &auth.Limiter{Free: 5, Base: 2 * time.Second, Max: 15 * time.Minute, Now: opts.Now}
 	s.userLimit = &auth.Limiter{Free: 30, Base: time.Second, Max: time.Minute, Now: opts.Now}
 	s.ipLimit = &auth.Limiter{Free: 30, Base: time.Second, Max: 5 * time.Minute, Now: opts.Now}
+	s.hashLimit = &auth.Bucket{Burst: 30, Every: 10 * time.Second, Now: opts.Now}
 	if s.pages, err = parsePages(); err != nil {
 		return nil, err
 	}
@@ -225,6 +229,7 @@ func (s *Server) Prune() {
 	s.pairLimit.Prune()
 	s.userLimit.Prune()
 	s.ipLimit.Prune()
+	s.hashLimit.Prune()
 	s.opts.Banner.Prune()
 }
 
@@ -412,6 +417,30 @@ func (s *Server) release(keys ...string) {
 			delete(s.inFlight, k)
 		}
 	}
+}
+
+// hashBudget reserves one password hash for this request before an
+// unthrottled path (invite, reset, setup, password change, admin create)
+// runs it: an in-flight slot for the address, held until release is
+// called, and one unit of the per-address budget (plus any extra keys,
+// e.g. the invite). Only two hashes run at once server-wide, so without
+// this one user or invite holder could keep everyone else's logins busy.
+// On refusal it has written a 429.
+func (s *Server) hashBudget(w http.ResponseWriter, r *http.Request, extra ...string) (release func(), ok bool) {
+	ip := s.limitKey(r)
+	for _, k := range append([]string{ip}, extra...) {
+		if ok, wait := s.hashLimit.Take(k); !ok {
+			w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
+			http.Error(w, "too many attempts; try again in a minute", http.StatusTooManyRequests)
+			return nil, false
+		}
+	}
+	if !s.acquire(ip) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "too many attempts at once; try again in a moment", http.StatusTooManyRequests)
+		return nil, false
+	}
+	return func() { s.release(ip) }, true
 }
 
 // ServeHTTP routes by host, then by exact path or prefix. It does not use

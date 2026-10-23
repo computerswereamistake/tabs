@@ -1319,3 +1319,61 @@ func TestDemotedAdminCantCreate(t *testing.T) {
 		t.Error("demoted admin created an account")
 	}
 }
+
+// F1: a taken username is refused before any hashing, and every hash
+// counts against a per-address budget.
+func TestInviteTakenNameSkipsHash(t *testing.T) {
+	e := newEnv(t)
+	e.user("bob", false)
+	tok, _ := auth.NewToken()
+	_ = e.st.CreateInvite(store.Invite{Hash: auth.HashToken(tok), ExpiresAt: e.now.Add(time.Hour), MaxUses: 5})
+	b := e.browser()
+	b.follow("GET", authBase+pathInvite+"/"+tok, nil)
+	rr := b.request("POST", authBase+pathInvite, url.Values{"username": {"bob"}, "password": {"a long password here"}, "confirm": {"a long password here"}}, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("taken name = %d", rr.Code)
+	}
+	if e.s.hashLimit.Spent(clientIP) {
+		t.Error("a taken-name invite post spent a password hash")
+	}
+}
+
+func TestHashBudget(t *testing.T) {
+	e := newEnv(t)
+	req := httptest.NewRequest(http.MethodPost, authBase+"/", nil)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	for i := range e.s.hashLimit.Burst {
+		release, ok := e.s.hashBudget(httptest.NewRecorder(), req)
+		if !ok {
+			t.Fatalf("hash %d refused within the budget", i)
+		}
+		release()
+	}
+	rr := httptest.NewRecorder()
+	if _, ok := e.s.hashBudget(rr, req); ok || rr.Code != http.StatusTooManyRequests {
+		t.Errorf("over budget: ok=%v code=%d", ok, rr.Code)
+	}
+	if len(e.s.inFlight) != 0 {
+		t.Errorf("slots leaked: %v", e.s.inFlight)
+	}
+}
+
+// F2: wrong passwords trickled in from elsewhere don't keep the real user
+// out from their own address, but still slow the addresses that failed.
+func TestUserBackoffSparesCleanAddresses(t *testing.T) {
+	e := newEnv(t)
+	e.user("alice", false)
+	m := e.browser()
+	for i := range 40 { // past userLimit's free attempts, spread to dodge per-address limits
+		m.ip = fmt.Sprintf("203.0.113.%d", i/4+1)
+		m.request("POST", authBase+pathLogin, url.Values{"username": {"alice"}, "password": {"wrong password"}}, nil)
+	}
+	m.ip = "203.0.113.1" // has failed for alice
+	if rr := m.request("POST", authBase+pathLogin, url.Values{"username": {"alice"}, "password": {"wrong password"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Errorf("failing address not slowed: %d", rr.Code)
+	}
+	if rr := e.browser().login("alice", "password-for-alice"); rr.Code != http.StatusOK {
+		t.Errorf("real user locked out from a clean address: %d", rr.Code)
+	}
+}

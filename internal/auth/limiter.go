@@ -64,6 +64,14 @@ func (l *Limiter) Take(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// Has reports whether key has any recorded failures.
+func (l *Limiter) Has(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.entries[key]
+	return ok
+}
+
 // Fail records a failed attempt for key.
 func (l *Limiter) Fail(key string) {
 	l.mu.Lock()

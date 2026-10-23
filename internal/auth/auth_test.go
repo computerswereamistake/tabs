@@ -338,3 +338,39 @@ func TestBanner(t *testing.T) {
 		}
 	}
 }
+
+func TestBucket(t *testing.T) {
+	now := time.Unix(0, 0)
+	b := &Bucket{Burst: 3, Every: 10 * time.Second, Now: func() time.Time { return now }}
+	for i := range 3 {
+		if ok, _ := b.Take("a"); !ok {
+			t.Fatalf("take %d refused within the burst", i)
+		}
+	}
+	if ok, wait := b.Take("a"); ok || wait != 10*time.Second {
+		t.Fatalf("empty bucket: ok=%v wait=%v", ok, wait)
+	}
+	if ok, _ := b.Take("b"); !ok {
+		t.Error("other key affected")
+	}
+	// Steady use at the refill rate never runs dry.
+	for range 100 {
+		now = now.Add(10 * time.Second)
+		if ok, _ := b.Take("a"); !ok {
+			t.Fatal("refill-rate use refused")
+		}
+	}
+	now = now.Add(time.Minute)
+	b.Prune()
+	if b.Spent("a") || len(b.entries) != 0 {
+		t.Error("refilled bucket not pruned")
+	}
+	// A clock stepping backwards doesn't drain tokens.
+	b.Take("c")
+	now = now.Add(-time.Hour)
+	for i := range 2 {
+		if ok, _ := b.Take("c"); !ok {
+			t.Fatalf("take %d refused after the clock went back", i)
+		}
+	}
+}

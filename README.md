@@ -80,7 +80,18 @@ YAML.
   an account, so nobody can lock you out from elsewhere. If you'd rather
   lock accounts too, set `TABS_LOCK_AFTER`; an admin then has to unlock
   them. Admins are never locked, or anyone who knew their usernames could
-  lock every admin out.
+  lock every admin out. The per-username backoff only slows addresses that
+  have already failed for that user, so you can still log in from your own;
+  an account is protected by these per-address limits and the ban rather
+  than a per-account cap, so a guesser with many addresses gets a few tries
+  from each. Use a long password (and two-factor) accordingly. Every
+  password check, right or wrong, also draws on a per-address rate (a
+  burst of 30, then one per 10 seconds), since only two run at once
+  server-wide. Each user keeps at most 20 sessions, and at most 5
+  half-finished two-factor logins; past that the oldest of the same kind
+  ends. So someone who has a user's password (but not their code) can't
+  end that user's sessions, but by starting logins can make the user's own
+  half-finished login fail, which they then retry.
 - **Recovery codes** are shown once when two-factor is turned on, for the
   user to save; nobody can send them. Making new ones needs the password and
   a current code. If someone loses both their authenticator and their codes,
@@ -257,7 +268,12 @@ are **not** behind `forward_auth` (tabs authenticates them itself):
 }
 
 auth.example.com {
-	reverse_proxy tabs:8080
+	handle /_tabs/auth/verify {
+		respond 404                       # here too: only forward_auth calls it
+	}
+	handle {
+		reverse_proxy tabs:8080
+	}
 }
 
 tabs.example.com {

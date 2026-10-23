@@ -266,7 +266,12 @@ func (s *Server) adminCreateUser(c *adminCtx) result {
 	temp := r.PostFormValue("password")
 	if err == nil && temp != "" {
 		if err = auth.CheckPassword(temp, name); err == nil {
+			release, ok := s.hashBudget(c.w, r)
+			if !ok {
+				return handled
+			}
 			u.PasswordHash, err = auth.HashPassword(temp)
+			release()
 			u.MustChangePassword = true
 		}
 	}

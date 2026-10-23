@@ -202,7 +202,12 @@ func (s *Server) accountPassword(c *accountCtx) result {
 	if err := auth.CheckPassword(pw, c.a.user.Username); err != nil {
 		return refuse(http.StatusBadRequest, userError(err))
 	}
+	release, ok := s.hashBudget(c.w, c.r)
+	if !ok {
+		return handled
+	}
 	hash, err := auth.HashPassword(pw)
+	release()
 	if err != nil {
 		return s.failResult(c.w, c.r, err)
 	}

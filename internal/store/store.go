@@ -830,12 +830,47 @@ func (s *Store) RedeemReset(hash string, now time.Time, passwordHash string) (Us
 
 // --- sessions ---
 
-// CreateSession stores a new session. ID and Hash must be set.
+// Session caps per user: creating another ends the oldest of the same
+// kind, so logging in repeatedly can't grow the database without bound.
+// Half-finished logins (password right, TOTP code still to come) have
+// their own small cap and only push out each other, so someone with just
+// the password can't log the real user out by starting logins.
+const (
+	MaxSessionsPerUser = 20
+	MaxPendingPerUser  = 5
+)
+
+// CreateSession stores a new session, ending the user's oldest sessions of
+// the same state beyond the cap for that state. ID and Hash must be set.
 func (s *Store) CreateSession(sess Session) error {
 	if sess.ID == "" || sess.Hash == "" {
 		return ErrInvalid
 	}
 	return s.update(func(tx *bolt.Tx) error {
+		existing, err := all[Session](tx.Bucket(bSessions))
+		if err != nil {
+			return err
+		}
+		limit := MaxSessionsPerUser
+		if sess.State == StateTOTPPending {
+			limit = MaxPendingPerUser
+		}
+		var mine []Session
+		for _, x := range existing {
+			if x.UserID == sess.UserID && (x.State == StateTOTPPending) == (sess.State == StateTOTPPending) {
+				mine = append(mine, x)
+			}
+		}
+		if extra := len(mine) - (limit - 1); extra > 0 {
+			slices.SortFunc(mine, func(a, b Session) int { return a.CreatedAt.Compare(b.CreatedAt) })
+			drop := make(map[string]bool, extra)
+			for _, x := range mine[:extra] {
+				drop[x.ID] = true
+			}
+			if err := deleteSessionsTx(tx, func(x Session) bool { return drop[x.ID] }); err != nil {
+				return err
+			}
+		}
 		if err := tx.Bucket(bSessionTokens).Put([]byte(sess.Hash), []byte(sess.ID)); err != nil {
 			return err
 		}

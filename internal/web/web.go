@@ -145,8 +145,6 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 		store: st, opts: opts, icons: icons, static: static, log: log,
 		authHost:   tabs.CanonicalHost(opts.AuthURL.Host),
 		portalHost: tabs.CanonicalHost(opts.PublicURL.Host),
-		authOrigin: origin(opts.AuthURL),
-		portal:     origin(opts.PublicURL),
 		setupToken: opts.SetupToken,
 		failures:   make(map[uint64]int),
 		inFlight:   make(map[string]int),
@@ -156,6 +154,8 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 	if s.authHost == "" || s.portalHost == "" || hostname(s.authHost) == hostname(s.portalHost) {
 		return nil, fmt.Errorf("auth and portal URLs must have different hostnames (cookies ignore ports)")
 	}
+	s.authOrigin = s.scheme() + "://" + s.authHost
+	s.portal = s.scheme() + "://" + s.portalHost
 	// Strict backoff for one username from one address; looser ceilings
 	// per username (so a spray from many addresses still slows) and per
 	// address (so one address can't walk many usernames quickly).
@@ -240,8 +240,6 @@ func hostname(h string) string {
 	}
 	return h
 }
-
-func origin(u *url.URL) string { return u.Scheme + "://" + u.Host }
 
 func (s *Server) scheme() string {
 	if s.opts.Insecure {

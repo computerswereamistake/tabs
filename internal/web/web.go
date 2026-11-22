@@ -114,6 +114,9 @@ type Server struct {
 	// successful or not: hashing is the expensive, globally limited step.
 	hashLimit *auth.Bucket
 
+	hashPassword   func(string) (string, error)
+	verifyPassword func(string, string) (bool, error)
+
 	setupMu    sync.Mutex
 	setupToken string
 
@@ -143,15 +146,17 @@ func New(cfg tabs.Config, st *store.Store, opts Options, icons fs.FS, log *slog.
 	}
 	s := &Server{
 		store: st, opts: opts, icons: icons, static: static, log: log,
-		authHost:   tabs.CanonicalHost(opts.AuthURL.Host),
-		portalHost: tabs.CanonicalHost(opts.PublicURL.Host),
-		authOrigin: origin(opts.AuthURL),
-		portal:     origin(opts.PublicURL),
-		setupToken: opts.SetupToken,
-		failures:   make(map[uint64]int),
-		inFlight:   make(map[string]int),
-		seen:       make(map[string]time.Time),
-		flushed:    make(map[string]flushRec),
+		authHost:       tabs.CanonicalHost(opts.AuthURL.Host),
+		portalHost:     tabs.CanonicalHost(opts.PublicURL.Host),
+		authOrigin:     origin(opts.AuthURL),
+		portal:         origin(opts.PublicURL),
+		setupToken:     opts.SetupToken,
+		failures:       make(map[uint64]int),
+		inFlight:       make(map[string]int),
+		seen:           make(map[string]time.Time),
+		flushed:        make(map[string]flushRec),
+		hashPassword:   auth.HashPassword,
+		verifyPassword: auth.VerifyPassword,
 	}
 	if s.authHost == "" || s.portalHost == "" || hostname(s.authHost) == hostname(s.portalHost) {
 		return nil, fmt.Errorf("auth and portal URLs must have different hostnames (cookies ignore ports)")

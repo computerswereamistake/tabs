@@ -50,6 +50,11 @@ func testConfig() tabs.Config {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWithURLs(t, authBase, portalBase)
+}
+
+func newEnvWithURLs(t *testing.T, rawAuth, rawPortal string) *env {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "tabs.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -60,8 +65,14 @@ func newEnv(t *testing.T) *env {
 	box, _ := auth.NewSecretBox(key)
 	trusted, _ := ParseTrustedProxies("10.0.0.0/8")
 	e := &env{t: t, st: st, box: box, now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC), setup: "setup-token-value"}
-	au, _ := url.Parse(authBase)
-	pu, _ := url.Parse(portalBase)
+	au, err := url.Parse(rawAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pu, err := url.Parse(rawPortal)
+	if err != nil {
+		t.Fatal(err)
+	}
 	icons := fstest.MapFS{
 		"alpha.svg":     {Data: []byte("<svg/>")},
 		"sub/inner.svg": {Data: []byte("<svg/>")},
@@ -889,6 +900,68 @@ func TestBanAndLock(t *testing.T) {
 	}
 }
 
+func TestAdminUnbanClearsPairLimit(t *testing.T) {
+	e := newEnv(t)
+	e.s.opts.Banner.Now = func() time.Time { return e.now }
+	e.user("bob", false, "users")
+	e.user("ann", true, "admins")
+
+	bob := e.browser()
+	bob.ip = "203.0.113.5"
+	// Trigger a ban via 10 failed logins on bob's own account, stepping past
+	// pairLimit backoff between attempts so all 10 reach the password check
+	// within the 15-minute ban window. Do not advance the clock after the 10th
+	// failure so both Banner and pairLimit remain active.
+	for i := range 10 {
+		rr := bob.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"wrong password"}}, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d = %d, want %d", i+1, rr.Code, http.StatusUnauthorized)
+		}
+		if i < 9 {
+			e.now = e.now.Add(time.Minute)
+		}
+	}
+	if rr := bob.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("banned login = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+
+	// Another IP sharing the same prefix ("203.0.113.50" vs "203.0.113.5") is
+	// also backed off in pairLimit and must not be cleared when 203.0.113.5 is unbanned.
+	other := e.browser()
+	other.ip = "203.0.113.50"
+	for range 6 {
+		other.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"wrong password"}}, nil)
+	}
+	if rr := other.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("other IP not backed off = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+
+	// Admin lifts the ban on bob's IP via /_tabs/admin/bans.
+	ann := e.browser()
+	ann.login("ann", "password-for-ann")
+	ann.follow("GET", authBase+pathAdmin+"/bans", nil)
+	if ann.last.Code != http.StatusOK || !strings.Contains(ann.last.Body.String(), bob.ip) {
+		t.Fatalf("admin bans page: %d\n%s", ann.last.Code, ann.last.Body.String())
+	}
+	rr := ann.request("POST", authBase+pathAdmin+"/bans", url.Values{
+		"csrf": {ann.csrf()}, "action": {"unban"}, "ip": {bob.ip},
+	}, nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Ban lifted.") {
+		t.Fatalf("unban = %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// Without advancing the clock, bob can log in immediately from the unbanned IP.
+	rr = bob.login("bob", "password-for-bob")
+	if rr.Code != http.StatusOK || bob.lastURL != portalBase+"/" {
+		t.Fatalf("login after unban ended at %s (%d)\n%s", bob.lastURL, rr.Code, rr.Body.String())
+	}
+
+	// The unrelated IP with a shared string prefix remains backed off.
+	if rr := other.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Errorf("other IP after unbanning %s = %d, want %d", bob.ip, rr.Code, http.StatusTooManyRequests)
+	}
+}
+
 func TestClientIP(t *testing.T) {
 	e := newEnv(t)
 	tests := []struct {
@@ -1067,14 +1140,23 @@ func TestRedactPath(t *testing.T) {
 }
 
 func TestParseTrustedProxies(t *testing.T) {
-	ps, err := ParseTrustedProxies(" 172.16.0.0/12 , ,fd00::/8,127.0.0.1")
+	ps, err := ParseTrustedProxies(" 172.16.0.0/12 , ,fd00::/8,127.0.0.1,::ffff:10.0.0.0/104")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ps) != 3 {
-		t.Fatalf("got %d prefixes", len(ps))
+	want := []string{"172.16.0.0/12", "fd00::/8", "127.0.0.1/32", "10.0.0.0/8"}
+	if len(ps) != len(want) {
+		t.Fatalf("got %d prefixes, want %d", len(ps), len(want))
 	}
-	for _, bad := range []string{"nope", "10.0.0.0/33", "1.2.3", "0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96"} {
+	for i, p := range ps {
+		if !p.IsValid() || p.String() != want[i] {
+			t.Errorf("prefix[%d] = %q (valid=%v), want %q", i, p, p.IsValid(), want[i])
+		}
+	}
+	for _, bad := range []string{
+		"nope", "10.0.0.0/33", "1.2.3", "0.0.0.0/0", "::/0",
+		"::ffff:0.0.0.0/96", "::ffff:0.0.0.0/95", "::ffff:10.0.0.0/80", "::ffff:10.0.0.0/0",
+	} {
 		if _, err := ParseTrustedProxies(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
@@ -1423,5 +1505,113 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 	rr := e.browser().request("GET", authBase+pathLogin, nil, nil)
 	if strings.Contains(rr.Body.String(), `content="no-referrer"`) || rr.Header().Get("Referrer-Policy") == "no-referrer" {
 		t.Error("auth pages still use no-referrer")
+	}
+}
+
+func TestCanonicalOrigins(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		authURL   string
+		portalURL string
+	}{
+		{"uppercase", "https://Auth.Example.com", "https://Tabs.Example.com"},
+		{"trailing dot", "https://auth.example.com.", "https://tabs.example.com."},
+		{"explicit 443", "https://auth.example.com:443", "https://tabs.example.com:443"},
+		{"combined", "https://Auth.Example.com.:443", "https://TABS.Example.com.:443"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnvWithURLs(t, tt.authURL, tt.portalURL)
+			if e.s.authOrigin != authBase {
+				t.Errorf("authOrigin = %q, want %q", e.s.authOrigin, authBase)
+			}
+			if e.s.portal != portalBase {
+				t.Errorf("portal = %q, want %q", e.s.portal, portalBase)
+			}
+			e.user("bob", false, "users")
+			b := e.browser()
+
+			// Browser login POST sends canonical Origin even when configured URLs were not.
+			rr := b.login("bob", "password-for-bob")
+			if rr.Code != http.StatusOK || b.lastURL != portalBase+"/" {
+				t.Fatalf("login ended at %s (%d)\n%s", b.lastURL, rr.Code, rr.Body.String())
+			}
+
+			// Portal logout POST with canonical Origin succeeds and redirects to canonical auth origin.
+			csrf := b.csrf()
+			b.follow("POST", portalBase+pathLogout, url.Values{"csrf": {csrf}})
+			if b.lastURL != authBase+pathLoggedOut || b.last.Code != http.StatusOK {
+				t.Fatalf("logout ended at %s (%d)", b.lastURL, b.last.Code)
+			}
+		})
+	}
+}
+
+func TestSameOriginCanonicalHost(t *testing.T) {
+	e := newEnvWithURLs(t, "https://Auth.Example.com.:443", "https://Tabs.Example.com.:443")
+	e.user("bob", false, "users")
+	form := url.Values{"username": {"bob"}, "password": {"password-for-bob"}}
+
+	for _, host := range []string{
+		"Auth.Example.com",
+		"auth.example.com.",
+		"auth.example.com:443",
+		"AUTH.EXAMPLE.COM.:443",
+	} {
+		t.Run("login POST host="+host, func(t *testing.T) {
+			rr := e.browser().request("POST", "https://"+host+pathLogin, form, map[string]string{
+				"Origin":         "null",
+				"Sec-Fetch-Site": "same-origin",
+			})
+			if rr.Code == http.StatusForbidden {
+				t.Errorf("POST with Host=%q, Origin=null, Sec-Fetch-Site=same-origin got 403", host)
+			}
+			if rr.Code != http.StatusSeeOther {
+				t.Errorf("POST status = %d, want %d", rr.Code, http.StatusSeeOther)
+			}
+		})
+	}
+
+	t.Run("portal logout POST non-canonical host", func(t *testing.T) {
+		b := e.browser()
+		rr := b.login("bob", "password-for-bob")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("login = %d", rr.Code)
+		}
+		csrf := b.csrf()
+		nonCanonHost := "Tabs.Example.com.:443"
+		b.cookies[nonCanonHost] = b.cookies["tabs.example.com"]
+		rr = b.request("POST", "https://"+nonCanonHost+pathLogout, url.Values{"csrf": {csrf}}, map[string]string{
+			"Origin":         "null",
+			"Sec-Fetch-Site": "same-origin",
+		})
+		if rr.Code != http.StatusSeeOther {
+			t.Errorf("portal logout status = %d, want %d", rr.Code, http.StatusSeeOther)
+		}
+	})
+
+	for _, tt := range []struct {
+		name    string
+		host    string
+		allowed []string
+		want    bool
+	}{
+		{"uppercase", "Auth.Example.com", []string{authBase}, true},
+		{"trailing dot", "auth.example.com.", []string{authBase}, true},
+		{"explicit 443", "auth.example.com:443", []string{authBase}, true},
+		{"combined", "AUTH.EXAMPLE.COM.:443", []string{authBase}, true},
+		{"wrong host", "Evil.Example.com:443", []string{authBase}, false},
+		{"empty host rejected even if scheme-only allowed", "", []string{"https://", authBase}, false},
+		{"invalid port rejected", "auth.example.com:99999", []string{"https://", authBase}, false},
+		{"invalid host rejected", "bad host", []string{"https://", authBase}, false},
+	} {
+		t.Run("sameOrigin "+tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Host = tt.host
+			req.Header.Set("Origin", "null")
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			if got := sameOrigin(req, tt.allowed...); got != tt.want {
+				t.Errorf("sameOrigin(Host=%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
 	}
 }

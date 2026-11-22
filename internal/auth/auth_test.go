@@ -295,6 +295,42 @@ func TestLimiterTake(t *testing.T) {
 	}
 }
 
+func TestLimiterSucceedPrefix(t *testing.T) {
+	now := time.Unix(0, 0)
+	l := &Limiter{Free: 2, Base: time.Second, Max: time.Minute, Now: func() time.Time { return now }}
+	// Safe on a nil entries map.
+	l.SucceedPrefix("1.2.3.4|")
+
+	keys := []string{"1.2.3.4|alice", "1.2.3.4|bob", "1.2.3.40|alice", "5.6.7.8|alice"}
+	for _, k := range keys {
+		for range 3 {
+			l.Fail(k)
+		}
+		if ok, _ := l.Allow(k); ok {
+			t.Fatalf("%q not delayed after 3 failures", k)
+		}
+	}
+
+	l.SucceedPrefix("1.2.3.4|")
+
+	for _, cleared := range []string{"1.2.3.4|alice", "1.2.3.4|bob"} {
+		if l.Has(cleared) {
+			t.Errorf("%q still present after SucceedPrefix", cleared)
+		}
+		if ok, _ := l.Allow(cleared); !ok {
+			t.Errorf("%q still delayed after SucceedPrefix", cleared)
+		}
+	}
+	for _, kept := range []string{"1.2.3.40|alice", "5.6.7.8|alice"} {
+		if !l.Has(kept) {
+			t.Errorf("%q unexpectedly cleared by SucceedPrefix", kept)
+		}
+		if ok, _ := l.Allow(kept); ok {
+			t.Errorf("%q delay unexpectedly cleared by SucceedPrefix", kept)
+		}
+	}
+}
+
 func TestBanner(t *testing.T) {
 	now := time.Unix(0, 0)
 	b := NewBanner(3, time.Minute, time.Hour)

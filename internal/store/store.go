@@ -38,11 +38,12 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrUsernameTaken = errors.New("username is taken")
 	// ErrEmailTaken doesn't say who has the address, or that anyone does.
-	ErrEmailTaken  = errors.New("that email address can't be used")
-	ErrGroupExists = errors.New("group already exists")
-	ErrLastAdmin   = errors.New("that would leave no enabled admin")
-	ErrInviteUsed  = errors.New("invite is expired or used up")
-	ErrInvalid     = errors.New("invalid")
+	ErrEmailTaken   = errors.New("that email address can't be used")
+	ErrGroupExists  = errors.New("group already exists")
+	ErrLastAdmin    = errors.New("that would leave no enabled admin")
+	ErrInviteUsed   = errors.New("invite is expired or used up")
+	ErrInvalid      = errors.New("invalid")
+	ErrTOTPRequired = errors.New("two-factor login is required by a group")
 )
 
 // NameRE is the charset for usernames and group names. Group names match tab
@@ -446,47 +447,96 @@ func (s *Store) UpdateUserAs(a Actor, id uint64, fn func(u *User) error) (User, 
 func (s *Store) updateUser(id uint64, fn func(u *User) error) (User, error) {
 	var out User
 	err := s.update(func(tx *bolt.Tx) error {
-		users := tx.Bucket(bUsers)
-		u, err := get[User](users, idKey(id))
+		var err error
+		out, err = updateUserTx(tx, id, fn)
+		return err
+	})
+	return out, err
+}
+
+func updateUserTx(tx *bolt.Tx, id uint64, fn func(u *User) error) (User, error) {
+	users := tx.Bucket(bUsers)
+	u, err := get[User](users, idKey(id))
+	if err != nil {
+		return User{}, err
+	}
+	before := u
+	if err := fn(&u); err != nil {
+		return User{}, err
+	}
+	u.ID, u.Username, u.CreatedAt = before.ID, before.Username, before.CreatedAt
+	if err := checkGroupsTx(tx, u.Groups); err != nil {
+		return User{}, err
+	}
+	if u.Email != before.Email {
+		if err := checkEmailTx(tx, u.ID, u.Email); err != nil {
+			return User{}, err
+		}
+	}
+	u.AuthEpoch = before.AuthEpoch
+	if credentialsChanged(before, u) {
+		u.AuthEpoch++
+	}
+	if (before.Admin && !before.Disabled) && (!u.Admin || u.Disabled) {
+		if err := ensureOtherAdminTx(tx, u.ID); err != nil {
+			return User{}, err
+		}
+	}
+	if u.AuthEpoch != before.AuthEpoch {
+		if err := deleteSessionsTx(tx, func(x Session) bool { return x.UserID == u.ID }); err != nil {
+			return User{}, err
+		}
+	}
+	// A new password voids older reset links, or whoever holds one
+	// could overwrite it.
+	if u.PasswordHash != before.PasswordHash {
+		if err := deleteWhereTx(tx, bResets, func(x Reset) bool { return x.UserID == u.ID }); err != nil {
+			return User{}, err
+		}
+	}
+	return u, put(users, idKey(id), u)
+}
+
+func requiresTOTPTx(tx *bolt.Tx, groups []string) (bool, error) {
+	b := tx.Bucket(bGroups)
+	for _, name := range groups {
+		g, err := get[Group](b, []byte(name))
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
 		if err != nil {
-			return err
+			return false, err
 		}
-		before := u
-		if err := fn(&u); err != nil {
-			return err
+		if g.RequireTOTP {
+			return true, nil
 		}
-		u.ID, u.Username, u.CreatedAt = before.ID, before.Username, before.CreatedAt
-		if err := checkGroupsTx(tx, u.Groups); err != nil {
-			return err
-		}
-		if u.Email != before.Email {
-			if err := checkEmailTx(tx, u.ID, u.Email); err != nil {
+	}
+	return false, nil
+}
+
+// DisableTOTP clears user id's TOTP secret and recovery codes unless one of
+// their live groups requires TOTP. Checked in one write transaction with
+// the actor and live group list, so enabling RequireTOTP or adding a group
+// while a disable request is in flight cannot be raced.
+func (s *Store) DisableTOTP(id uint64) (User, error) {
+	var out User
+	err := s.update(func(tx *bolt.Tx) error {
+		var err error
+		out, err = updateUserTx(tx, id, func(u *User) error {
+			if !u.HasTOTP() {
+				return fmt.Errorf("%w: two-factor login isn't set up", ErrInvalid)
+			}
+			req, err := requiresTOTPTx(tx, u.Groups)
+			if err != nil {
 				return err
 			}
-		}
-		u.AuthEpoch = before.AuthEpoch
-		if credentialsChanged(before, u) {
-			u.AuthEpoch++
-		}
-		if (before.Admin && !before.Disabled) && (!u.Admin || u.Disabled) {
-			if err := ensureOtherAdminTx(tx, u.ID); err != nil {
-				return err
+			if req {
+				return ErrTOTPRequired
 			}
-		}
-		if u.AuthEpoch != before.AuthEpoch {
-			if err := deleteSessionsTx(tx, func(x Session) bool { return x.UserID == u.ID }); err != nil {
-				return err
-			}
-		}
-		// A new password voids older reset links, or whoever holds one
-		// could overwrite it.
-		if u.PasswordHash != before.PasswordHash {
-			if err := deleteWhereTx(tx, bResets, func(x Reset) bool { return x.UserID == u.ID }); err != nil {
-				return err
-			}
-		}
-		out = u
-		return put(users, idKey(id), u)
+			u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = "", 0, nil
+			return nil
+		})
+		return err
 	})
 	return out, err
 }

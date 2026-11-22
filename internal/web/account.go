@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"slices"
@@ -300,18 +301,19 @@ func (s *Server) accountTOTPDisable(c *accountCtx) result {
 	if s.requiresTOTP(c.a.user) {
 		return refuse(http.StatusForbidden, "One of your groups requires two-factor login, so it can't be turned off.")
 	}
-	if res, ok := s.recheckPassword(c); !ok {
+	if res, ok := s.recheckPasswordAndCode(c); !ok {
 		return res
 	}
-	if res, ok := s.recheckCode(c); !ok {
-		return res
-	}
-	u, res, ok := s.updateSelf(c, func(u *store.User) error {
-		u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = "", 0, nil
-		return nil
-	})
-	if !ok {
-		return res
+	u, err := s.store.As(store.Actor{SessionID: c.a.sess.ID}).DisableTOTP(c.a.user.ID)
+	switch {
+	case errors.Is(err, store.ErrStaleSession):
+		return s.staleSession(c)
+	case errors.Is(err, store.ErrTOTPRequired):
+		return refuse(http.StatusForbidden, "One of your groups requires two-factor login, so it can't be turned off.")
+	case errors.Is(err, store.ErrInvalid):
+		return refuse(http.StatusBadRequest, userError(err))
+	case err != nil:
+		return s.failResult(c.w, c.r, err)
 	}
 	s.audit(c.r, "totp-disabled", "user", u.Username)
 	if !s.reissueFor(c, u) {
@@ -326,17 +328,20 @@ func (s *Server) accountRecovery(c *accountCtx) result {
 	if !c.a.user.HasTOTP() {
 		return refuse(http.StatusBadRequest, "Two-factor login isn't set up.")
 	}
-	if res, ok := s.recheckPassword(c); !ok {
-		return res
-	}
-	if res, ok := s.recheckCode(c); !ok {
+	if res, ok := s.recheckPasswordAndCode(c); !ok {
 		return res
 	}
 	codes, hashes, err := auth.NewRecoveryCodes()
 	if err != nil {
 		return s.failResult(c.w, c.r, err)
 	}
-	u, res, ok := s.updateSelf(c, func(u *store.User) error { u.RecoveryHashes = hashes; return nil })
+	u, res, ok := s.updateSelf(c, func(u *store.User) error {
+		if !u.HasTOTP() {
+			return fmt.Errorf("%w: two-factor login isn't set up", store.ErrInvalid)
+		}
+		u.RecoveryHashes = hashes
+		return nil
+	})
 	if !ok {
 		return res
 	}
@@ -374,6 +379,12 @@ func (s *Server) accountRevokeOthers(c *accountCtx) result {
 	return done("Logged out everywhere else.")
 }
 
+func (s *Server) staleSession(c *accountCtx) result {
+	s.clearCookie(c.w, cookieAuth)
+	http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
+	return handled
+}
+
 // updateSelf applies fn to the request's own user, re-checking in the same
 // transaction that this session is still valid: a change that took a while
 // (password hashing) must not land after the session was revoked or the
@@ -382,9 +393,7 @@ func (s *Server) updateSelf(c *accountCtx, fn func(u *store.User) error) (store.
 	u, err := s.store.UpdateUserAs(store.Actor{SessionID: c.a.sess.ID}, c.a.user.ID, fn)
 	switch {
 	case errors.Is(err, store.ErrStaleSession):
-		s.clearCookie(c.w, cookieAuth)
-		http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
-		return u, handled, false
+		return u, s.staleSession(c), false
 	case errors.Is(err, store.ErrInvalid):
 		return u, refuse(http.StatusBadRequest, userError(err)), false
 	case err != nil:
@@ -430,9 +439,22 @@ type recoveryData struct {
 // throttled and counted like a login. On failure the result says what to
 // show (or that the response was written).
 func (s *Server) recheckPassword(c *accountCtx) (result, bool) {
+	return s.recheck(c, false)
+}
+
+// recheckPasswordAndCode re-checks the password and a current TOTP code
+// before a security change, only clearing rate limits once both pass so
+// failed reauth TOTP attempts remain counted against userLimit and
+// pairLimit.
+func (s *Server) recheckPasswordAndCode(c *accountCtx) (result, bool) {
+	return s.recheck(c, true)
+}
+
+func (s *Server) recheck(c *accountCtx, needCode bool) (result, bool) {
 	ip := s.limitKey(c.r)
+	name := c.a.user.Username
 	var msg string
-	if s.throttled(c.w, c.r, c.a.user.Username, ip, func(m string) { msg = m }) {
+	if s.throttled(c.w, c.r, name, ip, func(m string) { msg = m }) {
 		if msg == "" {
 			return handled, false // banned; throttled answered
 		}
@@ -445,18 +467,30 @@ func (s *Server) recheckPassword(c *accountCtx) (result, bool) {
 		return handled, false
 	}
 	if !ok {
-		s.failed(c.r, c.a.user.Username, ip, 0, "reauth-failed")
+		s.failed(c.r, name, ip, 0, "reauth-failed")
 		return refuse(http.StatusUnauthorized, "Your current password is wrong."), false
 	}
-	s.userLimit.Succeed(c.a.user.Username)
+	if needCode {
+		if res, ok := s.recheckCode(c); !ok {
+			return res, false
+		}
+	}
+	s.pairLimit.Succeed(ip + "|" + name)
+	s.userLimit.Succeed(name)
 	return result{}, true
 }
 
+var errNoTOTP = errors.New("no totp")
+
 // recheckCode checks a current TOTP code before a security change,
-// recording its step so it can't be replayed.
+// recording its step so it can't be replayed. Callers must have already
+// run throttled (which counts the attempt against userLimit).
 func (s *Server) recheckCode(c *accountCtx) (result, bool) {
 	code := strings.ReplaceAll(strings.TrimSpace(c.r.PostFormValue("code")), " ", "")
-	_, err := s.store.UpdateUser(c.a.user.ID, func(u *store.User) error {
+	_, err := s.store.UpdateUserAs(store.Actor{SessionID: c.a.sess.ID}, c.a.user.ID, func(u *store.User) error {
+		if !u.HasTOTP() {
+			return errNoTOTP
+		}
 		secret, err := s.opts.Box.Open(u.ID, u.TOTPSecret)
 		if err != nil {
 			return err
@@ -468,11 +502,15 @@ func (s *Server) recheckCode(c *accountCtx) (result, bool) {
 		u.TOTPLastStep = step
 		return nil
 	})
-	if errors.Is(err, errBadCode) {
+	switch {
+	case errors.Is(err, store.ErrStaleSession):
+		return s.staleSession(c), false
+	case errors.Is(err, errNoTOTP):
+		return refuse(http.StatusBadRequest, "Two-factor login isn't set up."), false
+	case errors.Is(err, errBadCode):
 		s.failed(c.r, c.a.user.Username, s.limitKey(c.r), 0, "reauth-totp-failed")
 		return refuse(http.StatusUnauthorized, "That code didn't work."), false
-	}
-	if err != nil {
+	case err != nil:
 		return s.failResult(c.w, c.r, err), false
 	}
 	return result{}, true

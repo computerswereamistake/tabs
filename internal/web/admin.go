@@ -47,13 +47,8 @@ type adminGroupsData struct {
 	Missing []string // used by tabs but not defined
 }
 
-type inviteRow struct {
-	store.Invite
-	Short string // first characters of the hash, to tell rows apart
-}
-
 type adminInvitesData struct {
-	Invites      []inviteRow
+	Invites      []store.Invite
 	Groups       []store.Group
 	Link         string
 	DefaultHours int
@@ -486,7 +481,7 @@ func (s *Server) loadAdminInvites(c *adminCtx, res result) (any, error) {
 	now := s.opts.Now()
 	for _, inv := range invs {
 		if inv.Usable(now) {
-			d.Invites = append(d.Invites, inviteRow{Invite: inv, Short: inv.Hash[:8]})
+			d.Invites = append(d.Invites, inv)
 		}
 	}
 	return d, nil
@@ -519,19 +514,11 @@ func (s *Server) adminCreateInvite(c *adminCtx) result {
 }
 
 func (s *Server) adminRevokeInvite(c *adminCtx) result {
-	short := c.r.PostFormValue("invite")
-	invs, err := s.store.Invites()
-	if err != nil {
+	hash := c.r.PostFormValue("invite")
+	if err := c.db.DeleteInvite(hash); err != nil {
 		return s.adminErr(c, err)
 	}
-	for _, inv := range invs {
-		if len(short) == 8 && strings.HasPrefix(inv.Hash, short) {
-			if err := c.db.DeleteInvite(inv.Hash); err != nil {
-				return s.adminErr(c, err)
-			}
-			s.audit(c.r, "admin-invite-revoked", "by", c.a.user.Username)
-		}
-	}
+	s.audit(c.r, "admin-invite-revoked", "by", c.a.user.Username)
 	return done("Invite revoked.")
 }
 

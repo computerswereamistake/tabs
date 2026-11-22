@@ -1417,3 +1417,165 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 		t.Error("auth pages still use no-referrer")
 	}
 }
+
+// A session revoked while recheckPassword was hashing cannot advance
+// TOTPLastStep in recheckCode.
+func TestRecheckCodeStaleSession(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.enrol(bob)
+	u, _ := e.st.UserByID(bob.ID)
+	ss, _ := e.st.UserSessions(bob.ID)
+	beforeStep := u.TOTPLastStep
+	code := e.totpCode(bob, e.now)
+
+	// Revoke the session before recheckCode runs.
+	if err := e.st.DeleteSession(ss[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, authBase+pathAccount, nil)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	req.PostForm = url.Values{"code": {code}}
+	rec := httptest.NewRecorder()
+	c := &accountCtx{w: rec, r: req, a: &authed{sess: ss[0], user: u, state: effFull}}
+	res, ok := e.s.recheckCode(c)
+	if ok || !res.written || rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != pathLogin {
+		t.Fatalf("recheckCode with stale session: ok=%v res=%+v code=%d loc=%q", ok, res, rec.Code, rec.Header().Get("Location"))
+	}
+	cleared := false
+	for _, ck := range rec.Result().Cookies() {
+		if ck.Name == e.s.cookieName(cookieAuth) && ck.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("auth cookie not cleared on stale session in recheckCode")
+	}
+	if after, _ := e.st.UserByID(bob.ID); after.TOTPLastStep != beforeStep {
+		t.Errorf("TOTPLastStep changed from %d to %d after session revocation", beforeStep, after.TOTPLastStep)
+	}
+}
+
+// If TOTP is absent when recheckCode runs on a live session, it refuses
+// cleanly with 400 rather than failing inside Box.Open with 500.
+func TestRecheckCodeConcurrentlyClearedTOTP(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	u, _ := e.st.UserByID(bob.ID)
+	ss, _ := e.st.UserSessions(bob.ID)
+	// Simulate a stale in-flight user snapshot that still believed TOTP was set.
+	staleUser := u
+	staleUser.TOTPSecret = "v1:stale"
+
+	req := httptest.NewRequest(http.MethodPost, authBase+pathAccount, nil)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	req.PostForm = url.Values{"code": {"123456"}}
+	rec := httptest.NewRecorder()
+	c := &accountCtx{w: rec, r: req, a: &authed{sess: ss[0], user: staleUser, state: effFull}}
+	res, ok := e.s.recheckCode(c)
+	if ok || res.written || res.status != http.StatusBadRequest {
+		t.Fatalf("recheckCode without TOTP: ok=%v res=%+v http=%d", ok, res, rec.Code)
+	}
+	if e.s.pairLimit.Has(clientIP + "|bob") {
+		t.Error("missing TOTP counted as a rate-limit failure")
+	}
+}
+
+// Enabling RequireTOTP on a user's group (or adding them to one) mid-flight
+// prevents accountTOTPDisable from clearing TOTP even after password and
+// code verification succeed.
+func TestAccountTOTPDisableRequiresTOTPTOCTOU(t *testing.T) {
+	e := newEnv(t)
+	if err := e.st.CreateGroup(store.Group{Name: "strict", RequireTOTP: true}); err != nil {
+		t.Fatal(err)
+	}
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.enrol(bob)
+	u, _ := e.st.UserByID(bob.ID)
+	ss, _ := e.st.UserSessions(bob.ID)
+
+	// Simulate an admin adding bob to the TOTP-requiring group after loadAuth
+	// loaded u (group changes keep the session valid).
+	if _, err := e.st.UpdateUser(bob.ID, func(x *store.User) error { x.Groups = []string{"users", "strict"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, authBase+pathAccount, nil)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	req.PostForm = url.Values{"current": {"password-for-bob"}, "code": {e.totpCode(bob, e.now)}}
+	rec := httptest.NewRecorder()
+	c := &accountCtx{w: rec, r: req, a: &authed{sess: ss[0], user: u, state: effFull}}
+	res := e.s.accountTOTPDisable(c)
+	if res.written || res.status != http.StatusForbidden {
+		t.Fatalf("accountTOTPDisable with mid-flight RequireTOTP: res=%+v http=%d", res, rec.Code)
+	}
+	if got, _ := e.st.UserByID(bob.ID); !got.HasTOTP() {
+		t.Error("TOTP was disabled despite group requiring TOTP")
+	}
+}
+
+// Reauth password success clears both pairLimit and userLimit for
+// password-only actions; for password+TOTP actions, failed TOTP codes
+// remain counted against userLimit, pairLimit, ipLimit, and Banner until
+// both factors succeed.
+func TestRecheckRateLimitAccounting(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.follow("GET", authBase+pathAccount, nil)
+
+	// A failed password check records both pairLimit and userLimit; a
+	// subsequent password-only success clears both.
+	if rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"totp-begin"}, "current": {"wrong"}}, nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("bad password on totp-begin = %d", rr.Code)
+	}
+	if !e.s.pairLimit.Has(clientIP+"|bob") || !e.s.userLimit.Has("bob") {
+		t.Fatalf("after failed reauth password: pair=%v user=%v", e.s.pairLimit.Has(clientIP+"|bob"), e.s.userLimit.Has("bob"))
+	}
+	if rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {b.csrf()}, "action": {"totp-begin"}, "current": {"password-for-bob"}}, nil); rr.Code != http.StatusOK {
+		t.Fatalf("good password on totp-begin = %d", rr.Code)
+	}
+	if e.s.pairLimit.Has(clientIP+"|bob") || e.s.userLimit.Has("bob") {
+		t.Fatalf("successful password reauth left limits set: pair=%v user=%v", e.s.pairLimit.Has(clientIP+"|bob"), e.s.userLimit.Has("bob"))
+	}
+
+	// Enrol TOTP and verify failed reauth TOTP codes accumulate in userLimit
+	// even though the password succeeds on every attempt.
+	b.enrol(bob)
+	b.follow("GET", authBase+pathAccount, nil)
+	csrf := b.csrf()
+	e.s.userLimit.Free = 3
+	for i := range 4 {
+		b.ip = fmt.Sprintf("203.0.113.%d", i/2+1) // 2 failures per IP, below pairLimit.Free
+		rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {csrf}, "action": {"recovery"}, "current": {"password-for-bob"}, "code": {"000000"}}, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d", i, rr.Code)
+		}
+	}
+	if !e.s.userLimit.Has("bob") || !e.s.pairLimit.Has("203.0.113.1|bob") || !e.s.ipLimit.Has("203.0.113.1") {
+		t.Fatalf("failed reauth TOTP not recorded across limiters: user=%v pair=%v ip=%v",
+			e.s.userLimit.Has("bob"), e.s.pairLimit.Has("203.0.113.1|bob"), e.s.ipLimit.Has("203.0.113.1"))
+	}
+	// Previously failing IP is now throttled by userLimit.
+	b.ip = "203.0.113.1"
+	if rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {csrf}, "action": {"recovery"}, "current": {"password-for-bob"}, "code": {"000000"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Errorf("failing address not throttled by userLimit after failed reauth TOTP: %d", rr.Code)
+	}
+	// A clean IP with valid password + valid TOTP succeeds and clears limits.
+	b.ip = clientIP
+	if rr := b.request("POST", authBase+pathAccount, url.Values{"csrf": {csrf}, "action": {"recovery"}, "current": {"password-for-bob"}, "code": {e.totpCode(bob, e.now)}}, nil); rr.Code != http.StatusOK {
+		t.Fatalf("valid reauth from clean IP = %d", rr.Code)
+	}
+	if e.s.pairLimit.Has(clientIP+"|bob") || e.s.userLimit.Has("bob") {
+		t.Fatalf("limits not cleared after both factors passed: pair=%v user=%v", e.s.pairLimit.Has(clientIP+"|bob"), e.s.userLimit.Has("bob"))
+	}
+}

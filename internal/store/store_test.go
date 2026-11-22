@@ -642,3 +642,71 @@ func TestPromotionRespectsSessionCap(t *testing.T) {
 		t.Errorf("just-promoted session lost: %v", err)
 	}
 }
+
+func TestDisableTOTP(t *testing.T) {
+	s := open(t)
+	_ = s.CreateGroup(Group{Name: "users"})
+	_ = s.CreateGroup(Group{Name: "strict", RequireTOTP: true})
+	u := mustUser(t, s, "alice", false, "users")
+	u, err := s.UpdateUser(u.ID, func(x *User) error {
+		x.TOTPSecret = "v1:secret"
+		x.TOTPLastStep = 42
+		x.RecoveryHashes = []string{"h1"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := Session{ID: "s1", Hash: "tok1", UserID: u.ID, State: StateFull, AuthEpoch: u.AuthEpoch, CreatedAt: now, LastSeen: now, ExpiresAt: now.Add(time.Hour)}
+	if err := s.CreateSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	as := s.As(Actor{SessionID: "s1"})
+
+	// Enabling RequireTOTP on the user's group blocks DisableTOTP atomically.
+	if err := s.UpdateGroup(Group{Name: "users", RequireTOTP: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := as.DisableTOTP(u.ID); !errors.Is(err, ErrTOTPRequired) {
+		t.Fatalf("DisableTOTP while group requires TOTP = %v, want ErrTOTPRequired", err)
+	}
+	if got, _ := s.UserByID(u.ID); !got.HasTOTP() || len(got.RecoveryHashes) != 1 {
+		t.Errorf("TOTP modified on refused disable: %+v", got)
+	}
+
+	// Adding the user to another group with RequireTOTP also blocks it.
+	if err := s.UpdateGroup(Group{Name: "users", RequireTOTP: false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateUser(u.ID, func(x *User) error { x.Groups = []string{"users", "strict"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := as.DisableTOTP(u.ID); !errors.Is(err, ErrTOTPRequired) {
+		t.Fatalf("DisableTOTP after adding strict group = %v, want ErrTOTPRequired", err)
+	}
+
+	// Stale actor session is refused.
+	if _, err := s.As(Actor{SessionID: "gone"}).DisableTOTP(u.ID); !errors.Is(err, ErrStaleSession) {
+		t.Fatalf("DisableTOTP with stale session = %v, want ErrStaleSession", err)
+	}
+
+	// Once no group requires TOTP, DisableTOTP clears it and ends sessions.
+	if _, err := s.UpdateUser(u.ID, func(x *User) error { x.Groups = []string{"users"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	got, err := as.DisableTOTP(u.ID)
+	if err != nil {
+		t.Fatalf("DisableTOTP: %v", err)
+	}
+	if got.HasTOTP() || got.TOTPLastStep != 0 || len(got.RecoveryHashes) != 0 || got.AuthEpoch <= u.AuthEpoch {
+		t.Errorf("after DisableTOTP: %+v", got)
+	}
+	if _, _, err := s.SessionByToken("tok1", now, time.Hour); err == nil {
+		t.Error("session survived DisableTOTP")
+	}
+
+	// Calling DisableTOTP when TOTP is not set up fails with ErrInvalid.
+	if _, err := s.DisableTOTP(u.ID); !errors.Is(err, ErrInvalid) {
+		t.Errorf("DisableTOTP without TOTP = %v, want ErrInvalid", err)
+	}
+}

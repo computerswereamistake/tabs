@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1146,6 +1147,96 @@ func TestAdminsAreNeverLocked(t *testing.T) {
 	}
 	if u, _ := e.st.UserByID(ann.ID); u.Locked {
 		t.Error("admin locked by failed logins")
+	}
+}
+
+func TestLockedAndDisabledDoNotSpuriouslyLock(t *testing.T) {
+	e := newEnv(t)
+	var logs bytes.Buffer
+	e.s.log = slog.New(slog.NewTextHandler(&logs, nil))
+	e.s.opts.LockAfter = 2
+	e.s.opts.Banner.Now = func() time.Time { return e.now }
+
+	bob := e.user("bob", false)
+	carol := e.user("carol", false)
+	_, _ = e.st.UpdateUser(carol.ID, func(u *store.User) error { u.Disabled = true; return nil })
+
+	b := e.browser()
+	// First LockAfter failures lock bob and emit one account-locked audit event.
+	for range 2 {
+		if rr := b.request(http.MethodPost, authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"wrong password"}}, nil); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("bob login = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+		e.now = e.now.Add(time.Hour)
+	}
+	if u, _ := e.st.UserByID(bob.ID); !u.Locked {
+		t.Fatal("bob not locked after LockAfter failures")
+	}
+	if got := strings.Count(logs.String(), "event=account-locked"); got != 1 {
+		t.Fatalf("account-locked events after initial lock = %d, want 1", got)
+	}
+
+	// Further failed logins against already-locked bob must not accumulate
+	// lock failures or emit additional account-locked audit events, while still
+	// auditing login-failed.
+	for range 4 {
+		if rr := b.request(http.MethodPost, authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"wrong password"}}, nil); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("locked bob login = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+		e.now = e.now.Add(time.Hour)
+	}
+	if got := strings.Count(logs.String(), "event=account-locked"); got != 1 {
+		t.Errorf("account-locked events after locked retries = %d, want 1", got)
+	}
+	if got := strings.Count(logs.String(), "event=login-failed"); got != 6 {
+		t.Errorf("login-failed events for bob = %d, want 6", got)
+	}
+	e.s.lockMu.Lock()
+	bobFailures := e.s.failures[bob.ID]
+	e.s.lockMu.Unlock()
+	if bobFailures != 0 {
+		t.Errorf("locked bob accumulated %d lock failures, want 0", bobFailures)
+	}
+
+	// Repeated failed logins against disabled carol must not lock the account
+	// or emit account-locked audit events, while still auditing login-failed.
+	for range 4 {
+		if rr := b.request(http.MethodPost, authBase+pathLogin, url.Values{"username": {"carol"}, "password": {"wrong password"}}, nil); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("disabled carol login = %d, want %d", rr.Code, http.StatusUnauthorized)
+		}
+		e.now = e.now.Add(time.Hour)
+	}
+	if u, _ := e.st.UserByID(carol.ID); u.Locked {
+		t.Error("disabled account was locked by failed logins")
+	}
+	if got := strings.Count(logs.String(), "event=account-locked"); got != 1 {
+		t.Errorf("account-locked events after disabled retries = %d, want 1", got)
+	}
+	if got := strings.Count(logs.String(), "event=login-failed"); got != 10 {
+		t.Errorf("login-failed events total = %d, want 10", got)
+	}
+	e.s.lockMu.Lock()
+	carolFailures := e.s.failures[carol.ID]
+	e.s.lockMu.Unlock()
+	if carolFailures != 0 {
+		t.Errorf("disabled carol accumulated %d lock failures, want 0", carolFailures)
+	}
+
+	// Defense in depth: direct failed() calls with a non-zero userID (e.g. from
+	// concurrent requests or TOTP) also never re-audit an already-locked user or
+	// lock a disabled user.
+	req := httptest.NewRequest(http.MethodPost, authBase+pathLoginTOTP, nil)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	for range 2 {
+		e.s.failed(req, "bob", clientIP, bob.ID, "totp-failed")
+		e.s.failed(req, "carol", clientIP, carol.ID, "totp-failed")
+	}
+	if u, _ := e.st.UserByID(carol.ID); u.Locked {
+		t.Error("disabled account locked via direct failed() call")
+	}
+	if got := strings.Count(logs.String(), "event=account-locked"); got != 1 {
+		t.Errorf("account-locked events after direct failed() calls = %d, want 1", got)
 	}
 }
 

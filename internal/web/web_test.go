@@ -1417,3 +1417,117 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 		t.Error("auth pages still use no-referrer")
 	}
 }
+
+// A concurrent TOTP confirm that reaches updateSelf after the user is already
+// enrolled returns 400 instead of 500 and leaves the stored secret intact.
+func TestAccountTOTPConfirmAlreadyEnrolled(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false)
+
+	firstSecret, err := auth.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSealed, err := e.box.Seal(bob.ID, firstSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := e.st.UpdateUser(bob.ID, func(u *store.User) error {
+		u.TOTPSecret = firstSealed
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a live session matching the user's current AuthEpoch carrying a
+	// second pending enrolment, while the request's user snapshot still
+	// predates enrolment so the guard inside updateSelf's transaction fires.
+	secondSecret, err := auth.NewTOTPSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSealed, err := e.box.Seal(bob.ID, secondSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := store.Session{
+		ID:          "sess-confirm-race",
+		Hash:        auth.HashToken("tok-confirm-race"),
+		UserID:      bob.ID,
+		State:       store.StateFull,
+		CSRF:        "csrf-tok",
+		AuthEpoch:   enrolled.AuthEpoch,
+		CreatedAt:   e.now,
+		LastSeen:    e.now,
+		ExpiresAt:   e.now.Add(time.Hour),
+		PendingTOTP: secondSealed,
+	}
+	if err := e.st.CreateSession(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	code, err := auth.TOTPCodeAt(secondSecret, e.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, authBase+pathAccount, nil)
+	req.PostForm = url.Values{"action": {"totp-confirm"}, "code": {code}}
+	c := &accountCtx{w: rec, r: req, a: &authed{sess: sess, user: bob, state: effFull}}
+
+	res := e.s.accountTOTPConfirm(c)
+	if res.written || res.status != http.StatusBadRequest {
+		t.Fatalf("result = %+v (rec %d), want status %d", res, rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(res.err, "already set up") {
+		t.Errorf("error message = %q, want already set up", res.err)
+	}
+	got, err := e.st.UserByID(bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TOTPSecret != firstSealed {
+		t.Error("concurrent confirm overwrote existing TOTP secret")
+	}
+}
+
+// A session revoked while accountTOTPBegin is verifying the password clears
+// the auth cookie and redirects to login instead of returning 500.
+func TestAccountTOTPBeginRevokedSession(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false)
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	ss, err := e.st.UserSessions(bob.ID)
+	if err != nil || len(ss) != 1 {
+		t.Fatalf("sessions = %v, err = %v", ss, err)
+	}
+	// Simulate the session being revoked after loadAuth (e.g. while
+	// recheckPassword was running argon2id).
+	if err := e.st.DeleteSession(ss[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, authBase+pathAccount, nil)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	req.PostForm = url.Values{"action": {"totp-begin"}, "current": {"password-for-bob"}}
+	c := &accountCtx{w: rec, r: req, a: &authed{sess: ss[0], user: bob, state: effFull}}
+
+	res := e.s.accountTOTPBegin(c)
+	if !res.written || rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != pathLogin {
+		t.Fatalf("result = %+v, response %d %q, want 303 %q", res, rec.Code, rec.Header().Get("Location"), pathLogin)
+	}
+	wantCookie := e.s.cookieName(cookieAuth)
+	var cleared bool
+	for _, ck := range rec.Result().Cookies() {
+		if ck.Name == wantCookie && ck.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("auth cookie %q not cleared: %v", wantCookie, rec.Result().Cookies())
+	}
+}

@@ -343,4 +343,51 @@ func TestHealthcheck(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("unspecified IPv6 dials loopback", func(t *testing.T) {
+		ln, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("IPv6 loopback unavailable: %v", err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/_tabs/healthz" {
+				http.NotFound(w, r)
+			}
+		}))
+		srv.Listener = ln
+		srv.Start()
+		defer srv.Close()
+
+		_, port, _ := net.SplitHostPort(ln.Addr().String())
+		if err := healthcheck("[::]:" + port); err != nil {
+			t.Errorf("healthcheck([::]:%s) = %v", port, err)
+		}
+	})
+}
+
+func TestHealthcheckAddr(t *testing.T) {
+	tests := []struct {
+		listen  string
+		want    string
+		wantErr bool
+	}{
+		{":8080", "127.0.0.1:8080", false},
+		{"0.0.0.0:8080", "127.0.0.1:8080", false},
+		{"[::]:8080", "[::1]:8080", false},
+		{"[0:0:0:0:0:0:0:0]:8080", "[::1]:8080", false},
+		{"127.0.0.1:8080", "127.0.0.1:8080", false},
+		{"[::1]:8080", "[::1]:8080", false},
+		{"localhost:8080", "localhost:8080", false},
+		{"nope", "", true},
+	}
+	for _, tt := range tests {
+		got, err := healthcheckAddr(tt.listen)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("healthcheckAddr(%q) err = %v, wantErr %v", tt.listen, err, tt.wantErr)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("healthcheckAddr(%q) = %q, want %q", tt.listen, got, tt.want)
+		}
+	}
 }

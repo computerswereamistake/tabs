@@ -1417,3 +1417,60 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 		t.Error("auth pages still use no-referrer")
 	}
 }
+
+func TestAdminGroupDeleteSkipsUnusedFields(t *testing.T) {
+	e := newEnv(t)
+	e.user("ann", true)
+	var logs strings.Builder
+	e.s.log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	ann := e.browser()
+	ann.login("ann", "password-for-ann")
+	ann.follow("GET", authBase+pathAdmin+"/groups", nil)
+	logs.Reset()
+
+	rr := ann.request("POST", authBase+pathAdmin+"/groups", url.Values{
+		"csrf":        {ann.csrf()},
+		"action":      {"delete"},
+		"name":        {"users"},
+		"description": {strings.Repeat("x", 101)},
+		"requireTOTP": {"on"},
+	}, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete group with long description = %d\n%s", rr.Code, rr.Body.String())
+	}
+	groups, err := e.st.Groups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range groups {
+		if g.Name == "users" {
+			t.Fatal("group users was not deleted")
+		}
+	}
+	out := logs.String()
+	if !strings.Contains(out, "event=admin-group-delete") {
+		t.Errorf("delete audit log missing event: %q", out)
+	}
+	if strings.Contains(out, "requireTOTP") {
+		t.Errorf("delete audit log included requireTOTP: %q", out)
+	}
+}
+
+func TestAdminFormAttributes(t *testing.T) {
+	e := newEnv(t)
+	e.user("ann", true)
+	ann := e.browser()
+	ann.login("ann", "password-for-ann")
+
+	users := ann.follow("GET", authBase+pathAdmin+"/users", nil)
+	if !strings.Contains(users.Body.String(), `pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"`) {
+		t.Errorf("admin users form missing username pattern:\n%s", users.Body.String())
+	}
+
+	invites := ann.follow("GET", authBase+pathAdmin+"/invites", nil)
+	wantMax := fmt.Sprintf(`name="uses" min="1" max="%d"`, maxInviteUses)
+	if !strings.Contains(invites.Body.String(), wantMax) {
+		t.Errorf("admin invites form missing %s:\n%s", wantMax, invites.Body.String())
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -1176,27 +1177,34 @@ func (s *Store) CreateGate(g Gate) error {
 // is open (a plain file copy of a live bbolt file can be torn). It writes
 // to a temporary file and renames it into place.
 func (s *Store) Backup(path string) error {
-	tmp := path + ".tmp"
-	err := s.db.View(func(tx *bolt.Tx) error {
-		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- operator-chosen path next to the database
-		if err != nil {
-			return err
-		}
-		if _, err := tx.WriteTo(f); err != nil {
-			_ = f.Close()
-			return err
-		}
-		if err := f.Sync(); err != nil {
-			_ = f.Close()
-			return err
-		}
-		return f.Close()
-	})
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	err = s.db.View(func(tx *bolt.Tx) error {
+		if _, err := tx.WriteTo(f); err != nil {
+			return err
+		}
+		return f.Sync()
+	})
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 // --- meta ---

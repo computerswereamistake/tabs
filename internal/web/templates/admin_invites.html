@@ -13,7 +13,7 @@
     <input type="hidden" name="action" value="create">
     {{template "group-boxes" (dict "Groups" $d.Groups "Checked" nil)}}
     <label>Expires after (hours) <input type="number" name="hours" min="1" max="{{$d.MaxHours}}" value="{{$d.DefaultHours}}" required></label>
-    <label>Uses <input type="number" name="uses" min="1" max="100" value="1" required></label>
+    <label>Uses <input type="number" name="uses" min="1" max="{{$d.MaxUses}}" value="1" required></label>
     <label>Note (shown to whoever opens it) <input name="note" maxlength="100"></label>
     <p class="muted">Invites never make admins.</p>
     <button type="submit">Create invite</button>

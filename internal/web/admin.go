@@ -270,7 +270,7 @@ func (s *Server) adminCreateUser(c *adminCtx) result {
 			if !ok {
 				return handled
 			}
-			u.PasswordHash, err = auth.HashPassword(temp)
+			u.PasswordHash, err = auth.HashPassword(r.Context(), temp)
 			release()
 			u.MustChangePassword = true
 		}

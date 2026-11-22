@@ -164,9 +164,13 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 	if err != nil || u.Disabled || u.Locked {
 		hash = "" // still spend the time, then fail
 	}
-	ok, verr := auth.VerifyPassword(hash, password)
+	ok, verr := auth.VerifyPassword(r.Context(), hash, password)
 	if errors.Is(verr, auth.ErrBusy) {
 		http.Error(w, "busy; try again in a moment", http.StatusServiceUnavailable)
+		return
+	}
+	if verr != nil {
+		s.fail(w, r, verr)
 		return
 	}
 	if !ok {

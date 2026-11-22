@@ -881,6 +881,68 @@ func TestBanAndLock(t *testing.T) {
 	}
 }
 
+func TestAdminUnbanClearsPairLimit(t *testing.T) {
+	e := newEnv(t)
+	e.s.opts.Banner.Now = func() time.Time { return e.now }
+	e.user("bob", false, "users")
+	e.user("ann", true, "admins")
+
+	bob := e.browser()
+	bob.ip = "203.0.113.5"
+	// Trigger a ban via 10 failed logins on bob's own account, stepping past
+	// pairLimit backoff between attempts so all 10 reach the password check
+	// within the 15-minute ban window. Do not advance the clock after the 10th
+	// failure so both Banner and pairLimit remain active.
+	for i := range 10 {
+		rr := bob.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"wrong password"}}, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d = %d, want %d", i+1, rr.Code, http.StatusUnauthorized)
+		}
+		if i < 9 {
+			e.now = e.now.Add(time.Minute)
+		}
+	}
+	if rr := bob.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("banned login = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+
+	// Another IP sharing the same prefix ("203.0.113.50" vs "203.0.113.5") is
+	// also backed off in pairLimit and must not be cleared when 203.0.113.5 is unbanned.
+	other := e.browser()
+	other.ip = "203.0.113.50"
+	for range 6 {
+		other.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"wrong password"}}, nil)
+	}
+	if rr := other.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("other IP not backed off = %d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+
+	// Admin lifts the ban on bob's IP via /_tabs/admin/bans.
+	ann := e.browser()
+	ann.login("ann", "password-for-ann")
+	ann.follow("GET", authBase+pathAdmin+"/bans", nil)
+	if ann.last.Code != http.StatusOK || !strings.Contains(ann.last.Body.String(), bob.ip) {
+		t.Fatalf("admin bans page: %d\n%s", ann.last.Code, ann.last.Body.String())
+	}
+	rr := ann.request("POST", authBase+pathAdmin+"/bans", url.Values{
+		"csrf": {ann.csrf()}, "action": {"unban"}, "ip": {bob.ip},
+	}, nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Ban lifted.") {
+		t.Fatalf("unban = %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// Without advancing the clock, bob can log in immediately from the unbanned IP.
+	rr = bob.login("bob", "password-for-bob")
+	if rr.Code != http.StatusOK || bob.lastURL != portalBase+"/" {
+		t.Fatalf("login after unban ended at %s (%d)\n%s", bob.lastURL, rr.Code, rr.Body.String())
+	}
+
+	// The unrelated IP with a shared string prefix remains backed off.
+	if rr := other.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+		t.Errorf("other IP after unbanning %s = %d, want %d", bob.ip, rr.Code, http.StatusTooManyRequests)
+	}
+}
+
 func TestClientIP(t *testing.T) {
 	e := newEnv(t)
 	tests := []struct {

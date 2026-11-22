@@ -558,6 +558,7 @@ func (s *Server) adminUnban(c *adminCtx) result {
 	ip := c.r.PostFormValue("ip")
 	s.opts.Banner.Unban(ip)
 	s.ipLimit.Succeed(ip)
+	s.pairLimit.SucceedPrefix(ip + "|")
 	s.audit(c.r, "admin-unban", "by", c.a.user.Username, "banned", ip)
 	return done("Ban lifted.")
 }

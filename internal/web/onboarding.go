@@ -245,8 +245,7 @@ func (s *Server) serveReset(w http.ResponseWriter, r *http.Request, st *state) {
 		return
 	}
 	tok := s.cookie(r, cookieReset)
-	now := s.opts.Now()
-	rs, err := s.store.Reset(auth.HashToken(tok), now)
+	rs, err := s.store.Reset(auth.HashToken(tok), s.opts.Now())
 	var u store.User
 	if err == nil {
 		u, err = s.store.UserByID(rs.UserID)
@@ -284,7 +283,7 @@ func (s *Server) serveReset(w http.ResponseWriter, r *http.Request, st *state) {
 		s.fail(w, r, err)
 		return
 	}
-	if _, err := s.store.RedeemReset(rs.Hash, now, hash); err != nil {
+	if _, err := s.store.RedeemReset(rs.Hash, s.opts.Now(), hash); err != nil {
 		s.message(w, r, http.StatusGone, "Link not valid", "This password link has expired or been used. Ask an admin for a new one.")
 		return
 	}

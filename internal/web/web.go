@@ -316,9 +316,12 @@ func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
 			return nil, err
 		}
 		if p.Addr().Is4In6() {
+			if p.Bits() <= 96 {
+				return nil, fmt.Errorf("%s: IPv4-mapped prefix length must be greater than 96", f)
+			}
 			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
-		if p.Bits() == 0 {
+		if !p.IsValid() || p.Bits() <= 0 {
 			return nil, fmt.Errorf("%s would trust every address", f)
 		}
 		out = append(out, p.Masked())

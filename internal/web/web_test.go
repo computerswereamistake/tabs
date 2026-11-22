@@ -1070,14 +1070,23 @@ func TestRedactPath(t *testing.T) {
 }
 
 func TestParseTrustedProxies(t *testing.T) {
-	ps, err := ParseTrustedProxies(" 172.16.0.0/12 , ,fd00::/8,127.0.0.1")
+	ps, err := ParseTrustedProxies(" 172.16.0.0/12 , ,fd00::/8,127.0.0.1,::ffff:10.0.0.0/104")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ps) != 3 {
-		t.Fatalf("got %d prefixes", len(ps))
+	want := []string{"172.16.0.0/12", "fd00::/8", "127.0.0.1/32", "10.0.0.0/8"}
+	if len(ps) != len(want) {
+		t.Fatalf("got %d prefixes, want %d", len(ps), len(want))
 	}
-	for _, bad := range []string{"nope", "10.0.0.0/33", "1.2.3", "0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96"} {
+	for i, p := range ps {
+		if !p.IsValid() || p.String() != want[i] {
+			t.Errorf("prefix[%d] = %q (valid=%v), want %q", i, p, p.IsValid(), want[i])
+		}
+	}
+	for _, bad := range []string{
+		"nope", "10.0.0.0/33", "1.2.3", "0.0.0.0/0", "::/0",
+		"::ffff:0.0.0.0/96", "::ffff:0.0.0.0/95", "::ffff:10.0.0.0/80", "::ffff:10.0.0.0/0",
+	} {
 		if _, err := ParseTrustedProxies(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}

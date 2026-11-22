@@ -344,3 +344,57 @@ func TestHealthcheck(t *testing.T) {
 		})
 	}
 }
+
+func TestDuration(t *testing.T) {
+	const key = "TABS_SESSION_IDLE"
+	const def = 7 * 24 * time.Hour
+
+	tests := []struct {
+		name    string
+		val     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"default when empty", "", def, false},
+		{"valid 7d", "7d", 7 * 24 * time.Hour, false},
+		{"valid 365d", "365d", 365 * 24 * time.Hour, false},
+		{"max bound 36500d", "36500d", 36500 * 24 * time.Hour, false},
+		{"valid go duration", "168h", 168 * time.Hour, false},
+		{"valid minutes", "15m", 15 * time.Minute, false},
+		{"zero days", "0d", 0, true},
+		{"negative days", "-7d", 0, true},
+		{"above max bound", "36501d", 0, true},
+		{"int64 overflow boundary", "106752d", 0, true},
+		{"overflow 200000d", "200000d", 0, true},
+		{"overflow 999999999d", "999999999d", 0, true},
+		{"atoi overflow", "99999999999999999999d", 0, true},
+		{"non-numeric days", "abcd", 0, true},
+		{"invalid go duration", "soon", 0, true},
+		{"zero go duration", "0s", 0, true},
+		{"negative go duration", "-1h", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := deps{getenv: func(k string) string {
+				if k == key {
+					return tt.val
+				}
+				return ""
+			}}
+			got, err := duration(d, key, def)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("duration(%q) err = %v, wantErr %v", tt.val, err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !strings.Contains(err.Error(), key) {
+					t.Errorf("duration(%q) err = %v, want it to mention %q", tt.val, err, key)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("duration(%q) = %v, want %v", tt.val, got, tt.want)
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -108,6 +109,17 @@ func (l *Limiter) Succeed(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.entries, key)
+}
+
+// SucceedPrefix clears failures for every key starting with prefix.
+func (l *Limiter) SucceedPrefix(prefix string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k := range l.entries {
+		if strings.HasPrefix(k, prefix) {
+			delete(l.entries, k)
+		}
+	}
 }
 
 // Prune drops entries idle for longer than Max.

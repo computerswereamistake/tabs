@@ -82,11 +82,14 @@ func newEnvWithURLs(t *testing.T, rawAuth, rawPortal string) *env {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	now := func() time.Time { return e.now }
+	banner := auth.NewBanner(10, 15*time.Minute, time.Hour)
+	banner.Now = now
 	e.s, err = New(cfg, st, Options{
 		AuthURL: au, PublicURL: pu, Trusted: trusted,
 		SessionIdle: 24 * time.Hour, SessionMax: 7 * 24 * time.Hour,
-		Box: box, Banner: auth.NewBanner(10, 15*time.Minute, time.Hour),
-		SetupToken: e.setup, Now: func() time.Time { return e.now },
+		Box: box, Banner: banner,
+		SetupToken: e.setup, Now: now,
 	}, icons, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -884,8 +887,13 @@ func TestBanAndLock(t *testing.T) {
 	for i := range 10 {
 		m.request("POST", authBase+pathLogin, url.Values{"username": {"user" + itoa(uint64(i))}, "password": {"x"}}, nil)
 	}
-	if rr := m.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil); rr.Code != http.StatusTooManyRequests {
+	rr := m.request("POST", authBase+pathLogin, url.Values{"username": {"bob"}, "password": {"password-for-bob"}}, nil)
+	if rr.Code != http.StatusTooManyRequests {
 		t.Errorf("banned address = %d", rr.Code)
+	}
+	wantRetry := fmt.Sprint(int(e.s.opts.Banner.Duration.Seconds()) + 1)
+	if got := rr.Header().Get("Retry-After"); got != wantRetry {
+		t.Errorf("banned Retry-After = %q, want %q", got, wantRetry)
 	}
 	if bans := e.s.opts.Banner.Bans(); len(bans) != 1 || bans[0].IP != "203.0.113.50" {
 		t.Errorf("bans = %v", bans)

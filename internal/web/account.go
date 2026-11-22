@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"slices"
@@ -251,7 +252,13 @@ func (s *Server) accountTOTPBegin(c *accountCtx) result {
 	if err != nil {
 		return s.failResult(c.w, c.r, err)
 	}
-	if err := s.store.UpdateSession(c.a.sess.ID, func(x *store.Session) bool { x.PendingTOTP = sealed; return true }); err != nil {
+	err = s.store.As(store.Actor{SessionID: c.a.sess.ID}).UpdateSession(c.a.sess.ID, func(x *store.Session) bool { x.PendingTOTP = sealed; return true })
+	switch {
+	case errors.Is(err, store.ErrStaleSession), errors.Is(err, store.ErrNotFound):
+		s.clearCookie(c.w, cookieAuth)
+		http.Redirect(c.w, c.r, pathLogin, http.StatusSeeOther)
+		return handled
+	case err != nil:
 		return s.failResult(c.w, c.r, err)
 	}
 	c.a.sess.PendingTOTP = sealed
@@ -277,7 +284,7 @@ func (s *Server) accountTOTPConfirm(c *accountCtx) result {
 	pending := c.a.sess.PendingTOTP
 	u, res, ok := s.updateSelf(c, func(u *store.User) error {
 		if u.HasTOTP() {
-			return errors.New("already enrolled")
+			return fmt.Errorf("%w: two-factor login is already set up", store.ErrInvalid)
 		}
 		u.TOTPSecret, u.TOTPLastStep, u.RecoveryHashes = pending, step, hashes
 		return nil

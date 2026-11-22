@@ -51,7 +51,7 @@ const TABS = [
 // a status number, "redirect", or "reject". The last entry repeats.
 // quota: characters (keys plus values) sessionStorage can hold; writes past it throw.
 // mobile: whether the phone-width media query matches.
-function boot({ hash = "", storage = {}, storageBroken = false, quota = Infinity, responses = [204], mobile = false } = {}) {
+function boot({ hash = "", storage = {}, storageBroken = false, quota = Infinity, responses = [204], mobile = false, reloadThrows = false } = {}) {
   const clock = { now: 0 };
   const byId = {};
   const add = (id, el = new El("div")) => (byId[id] = el);
@@ -105,7 +105,13 @@ function boot({ hash = "", storage = {}, storageBroken = false, quota = Infinity
   };
 
   let reloads = 0;
-  const location = { hash, reload: () => { reloads++; } };
+  const location = {
+    hash,
+    reload: () => {
+      reloads++;
+      if (reloadThrows) throw new Error("reload blocked");
+    },
+  };
   const winListeners = {};
   const window = {
     document,
@@ -345,4 +351,16 @@ test("choosing an app on mobile closes the drawer and moves focus out of it", ()
   b.navigate("#beta");
   assert.equal(b.sidebar.inert, true);
   assert.equal(b.document.activeElement, b.toggleMobile);
+});
+
+test("a throwing reload still clears the checking lock for later checks", async () => {
+  const b = boot({ responses: [401, 401, 204], reloadThrows: true });
+  await settle();
+  assert.equal(b.fetches.length, 2);
+  assert.equal(b.reloads(), 1);
+  b.clock.now = 16000;
+  b.window("focus");
+  await settle();
+  assert.equal(b.fetches.length, 3);
+  assert.equal(b.store.has("tabs:reloaded"), false);
 });

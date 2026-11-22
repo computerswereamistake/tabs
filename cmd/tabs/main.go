@@ -569,17 +569,33 @@ func rekeyCmd(d deps, args []string) error {
 	return nil
 }
 
+// healthcheckAddr maps a listen address to the local address healthcheck dials.
+func healthcheckAddr(listen string) (string, error) {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", err
+	}
+	switch ip := net.ParseIP(host); {
+	case host == "":
+		host = "127.0.0.1"
+	case ip != nil && ip.IsUnspecified():
+		if ip.To4() == nil {
+			host = "::1"
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
 // healthcheck probes the local listener. It only ever dials loopback.
 func healthcheck(listen string) error {
-	host, port, err := net.SplitHostPort(listen)
+	addr, err := healthcheckAddr(listen)
 	if err != nil {
 		return err
 	}
-	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
-		host = "127.0.0.1"
-	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/_tabs/healthz")
+	resp, err := client.Get("http://" + addr + "/_tabs/healthz")
 	if err != nil {
 		return err
 	}

@@ -28,7 +28,7 @@
   <form method="post" action="/_tabs/admin/users" class="stack">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="action" value="create">
-    <label>Username <input name="username" autocapitalize="none" spellcheck="false" required maxlength="64"></label>
+    <label>Username <input name="username" autocapitalize="none" spellcheck="false" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"></label>
     <label>Display name <input name="name" maxlength="100"></label>
     <label>Email (optional) <input type="email" name="email" maxlength="254"></label>
     {{template "group-boxes" (dict "Groups" $d.Groups "Checked" nil)}}

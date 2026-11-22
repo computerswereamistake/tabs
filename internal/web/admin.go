@@ -58,6 +58,7 @@ type adminInvitesData struct {
 	Link         string
 	DefaultHours int
 	MaxHours     int
+	MaxUses      int
 }
 
 type adminBansData struct {
@@ -450,6 +451,13 @@ func (s *Server) loadAdminGroups(c *adminCtx, _ result) (any, error) {
 func groupAction(op string) func(*Server, *adminCtx) result {
 	return func(s *Server, c *adminCtx) result {
 		name := strings.TrimSpace(c.r.PostFormValue("name"))
+		if op == "delete" {
+			if err := c.db.DeleteGroup(name); err != nil {
+				return s.adminErr(c, err)
+			}
+			s.audit(c.r, "admin-group-delete", "by", c.a.user.Username, "group", name)
+			return done("Saved.")
+		}
 		desc, err := store.CleanName(c.r.PostFormValue("description"))
 		if err != nil {
 			return s.adminErr(c, err)
@@ -460,8 +468,6 @@ func groupAction(op string) func(*Server, *adminCtx) result {
 			err = c.db.CreateGroup(g)
 		case "update":
 			err = c.db.UpdateGroup(g)
-		case "delete":
-			err = c.db.DeleteGroup(name)
 		}
 		if err != nil {
 			return s.adminErr(c, err)
@@ -482,7 +488,7 @@ func (s *Server) loadAdminInvites(c *adminCtx, res result) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := adminInvitesData{Groups: groups, Link: res.link, DefaultHours: defaultInviteTTL, MaxHours: maxInviteHours}
+	d := adminInvitesData{Groups: groups, Link: res.link, DefaultHours: defaultInviteTTL, MaxHours: maxInviteHours, MaxUses: maxInviteUses}
 	now := s.opts.Now()
 	for _, inv := range invs {
 		if inv.Usable(now) {

@@ -3,8 +3,10 @@ package store
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -483,9 +485,75 @@ func TestGatesPerSessionAndHostBounded(t *testing.T) {
 func TestBackup(t *testing.T) {
 	s := open(t)
 	mustUser(t, s, "alice", true)
-	path := filepath.Join(t.TempDir(), "backup.db")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "backup.db")
 	if err := s.Backup(path); err != nil {
 		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("backup mode = %o, want 0600", fi.Mode().Perm())
+	}
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if u, err := b.UserByName("alice"); err != nil || !u.Admin {
+		t.Errorf("backup missing data: %v", err)
+	}
+
+	// Failed rename (target is a directory) cleans up its temp file.
+	badTarget := filepath.Join(dir, "isdir")
+	if err := os.Mkdir(badTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup(badTarget); err == nil {
+		t.Fatal("backup onto a directory succeeded")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file: %s", e.Name())
+		}
+	}
+}
+
+func TestBackupConcurrent(t *testing.T) {
+	s := open(t)
+	mustUser(t, s, "alice", true)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "backup.db")
+
+	const workers = 8
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			errs <- s.Backup(path)
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Backup: %v", err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file: %s", e.Name())
+		}
 	}
 	b, err := Open(path)
 	if err != nil {

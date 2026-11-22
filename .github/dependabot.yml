@@ -6,7 +6,7 @@ updates:
     schedule:
       interval: weekly
 
-  # The one Go dependency (YAML).
+  # Go module dependencies.
   - package-ecosystem: gomod
     directory: /
     schedule:

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -672,6 +673,128 @@ func TestTOTPAttemptCap(t *testing.T) {
 	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != pathLogin {
 		t.Errorf("after cap: %d %q", rr.Code, rr.Header().Get("Location"))
 	}
+}
+
+func TestTOTPAttemptCapPreservesInFlightSession(t *testing.T) {
+	t.Run("extra request at cap does not delete pending session", func(t *testing.T) {
+		e := newEnv(t)
+		bob := e.user("bob", false)
+		b := e.browser()
+		b.login("bob", "password-for-bob")
+		b.enrol(bob)
+
+		c := e.browser()
+		c.login("bob", "password-for-bob")
+		csrf := c.csrf()
+
+		// Find the pending session and simulate an in-flight final attempt
+		// that has already reserved the last slot before completing rotate.
+		ss, err := e.st.UserSessions(bob.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pending store.Session
+		for _, x := range ss {
+			if x.State == store.StateTOTPPending {
+				pending = x
+				break
+			}
+		}
+		if pending.ID == "" {
+			t.Fatal("pending session not found")
+		}
+		if err := e.st.UpdateSession(pending.ID, func(x *store.Session) bool {
+			x.Attempts = maxTOTPAttempts
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// A concurrent extra request sees the cap reached and is refused,
+		// without deleting the session out from under the in-flight attempt.
+		extra := e.browser()
+		extra.cookies["auth.example.com"] = map[string]string{
+			"__Host-tabs_auth": c.cookies["auth.example.com"]["__Host-tabs_auth"],
+		}
+		rr := extra.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {csrf}, "code": {"000000"}}, nil)
+		if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "Too many wrong codes") {
+			t.Fatalf("extra request at cap = %d\n%s", rr.Code, rr.Body.String())
+		}
+
+		got, _, err := e.st.SessionByID(pending.ID, e.now, 0)
+		if err != nil {
+			t.Fatalf("pending session was deleted by extra request: %v", err)
+		}
+		if got.State != store.StateTOTPPending || got.Attempts != maxTOTPAttempts {
+			t.Fatalf("pending session = %+v", got)
+		}
+
+		// The in-flight valid final attempt can still rotate the session to full.
+		if err := e.s.rotate(httptest.NewRecorder(), pending, func(x *store.Session) {
+			x.State = store.StateFull
+			x.Attempts = 0
+			x.ExpiresAt = e.now.Add(e.s.opts.SessionMax)
+		}); err != nil {
+			t.Fatalf("in-flight rotate failed: %v", err)
+		}
+		got, _, err = e.st.SessionByID(pending.ID, e.now, 0)
+		if err != nil || got.State != store.StateFull || got.Attempts != 0 {
+			t.Fatalf("after rotate: session = %+v, err = %v", got, err)
+		}
+	})
+
+	t.Run("concurrent final recovery attempt never burns code with 500", func(t *testing.T) {
+		e := newEnv(t)
+		bob := e.user("bob", false)
+		b := e.browser()
+		b.login("bob", "password-for-bob")
+		recovery := b.enrol(bob)
+
+		c := e.browser()
+		c.login("bob", "password-for-bob")
+		csrf := c.csrf()
+		for range maxTOTPAttempts - 1 {
+			if rr := c.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {csrf}, "code": {"000000"}}, nil); rr.Code != http.StatusUnauthorized {
+				t.Fatalf("wrong attempt = %d", rr.Code)
+			}
+		}
+
+		tok := c.cookies["auth.example.com"]["__Host-tabs_auth"]
+		good := e.browser()
+		good.ip = "198.51.100.10"
+		good.cookies["auth.example.com"] = map[string]string{"__Host-tabs_auth": tok}
+		extra := e.browser()
+		extra.ip = "198.51.100.11"
+		extra.cookies["auth.example.com"] = map[string]string{"__Host-tabs_auth": tok}
+
+		var goodRR, extraRR *httptest.ResponseRecorder
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			goodRR = good.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {csrf}, "code": {recovery[0]}}, nil)
+		}()
+		go func() {
+			defer wg.Done()
+			extraRR = extra.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {csrf}, "code": {"000000"}}, nil)
+		}()
+		wg.Wait()
+
+		if goodRR.Code == http.StatusInternalServerError || extraRR.Code == http.StatusInternalServerError {
+			t.Fatalf("unexpected 500: good=%d extra=%d", goodRR.Code, extraRR.Code)
+		}
+		u, err := e.st.UserByID(bob.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		codeConsumed := len(u.RecoveryHashes) == len(recovery)-1
+		if codeConsumed && goodRR.Code != http.StatusOK {
+			t.Fatalf("recovery code consumed without succeeding: good=%d extra=%d", goodRR.Code, extraRR.Code)
+		}
+		if !codeConsumed && goodRR.Code == http.StatusOK {
+			t.Fatalf("login succeeded without consuming recovery code")
+		}
+	})
 }
 
 func TestGroupRequiresTOTP(t *testing.T) {

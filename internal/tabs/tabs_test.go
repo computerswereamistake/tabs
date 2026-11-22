@@ -138,6 +138,11 @@ func TestValidate(t *testing.T) {
 		{"wildcard host", func(c *Config) { c.Tabs[1].URL = "https://*.example.com/" }},
 		{"comma in host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com,evil/" }},
 		{"semicolon in host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com;img-src/" }},
+		{"empty port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:/" }},
+		{"port zero", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:0/" }},
+		{"out-of-range port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:99999/" }},
+		{"ipv6 literal host", func(c *Config) { c.Tabs[1].URL = "https://[::1]:8443/" }},
+		{"trailing dot host", func(c *Config) { c.Tabs[1].URL = "https://two.example.com./" }},
 		{"url is app root", func(c *Config) { c.Tabs[0].URL = "/" }},
 		{"url is app route", func(c *Config) { c.Tabs[0].URL = "/_tabs/healthz" }},
 		{"url is app route, unclean", func(c *Config) { c.Tabs[0].URL = "/x/../_tabs/" }},
@@ -164,6 +169,9 @@ func TestValidateAccepts(t *testing.T) {
 		{"no icon", func(c *Config) { c.Tabs[0].Icon = "" }},
 		{"uppercase icon extension", func(c *Config) { c.Tabs[0].Icon = "ONE.PNG" }},
 		{"host with port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:8443/x/" }},
+		{"host with default https port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:443/x/" }},
+		{"host with max port", func(c *Config) { c.Tabs[1].URL = "https://two.example.com:65535/x/" }},
+		{"uppercase host", func(c *Config) { c.Tabs[1].URL = "https://Two.Example.COM/x/" }},
 		{"path starting with _tabs-like name", func(c *Config) { c.Tabs[0].URL = "/_tabsish/" }},
 	}
 	for _, tt := range tests {
@@ -181,8 +189,12 @@ func TestFrameOrigins(t *testing.T) {
 	c := Config{Tabs: []Tab{
 		{URL: "/one/"},
 		{URL: "https://a.example.com/x/"},
+		{URL: "https://A.Example.COM:443/y/"},
 		{URL: "https://b.example.com:8443/"},
+		{URL: "https://B.Example.com:8443/z/"},
 		{URL: "https://a.example.com/y/"},
+		{URL: "https://bad.example.com:/"},
+		{URL: "https://bad.example.com:99999/"},
 		{URL: "/two/"},
 	}}
 	want := []string{"https://a.example.com", "https://b.example.com:8443"}

@@ -39,7 +39,8 @@ const badLogin = "Wrong username or password."
 func (s *Server) throttled(w http.ResponseWriter, r *http.Request, name, ip string, render func(msg string)) bool {
 	if banned, until := s.opts.Banner.Banned(ip); banned {
 		s.audit(r, "banned-attempt", "user", name)
-		w.Header().Set("Retry-After", fmt.Sprint(int(time.Until(until).Seconds())+1))
+		wait := max(0, until.Sub(s.opts.Now()))
+		w.Header().Set("Retry-After", fmt.Sprint(int(wait.Seconds())+1))
 		http.Error(w, "too many failed attempts from your address; try again later", http.StatusTooManyRequests)
 		return true
 	}

@@ -50,6 +50,11 @@ func testConfig() tabs.Config {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWithURLs(t, authBase, portalBase)
+}
+
+func newEnvWithURLs(t *testing.T, rawAuth, rawPortal string) *env {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "tabs.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -60,8 +65,14 @@ func newEnv(t *testing.T) *env {
 	box, _ := auth.NewSecretBox(key)
 	trusted, _ := ParseTrustedProxies("10.0.0.0/8")
 	e := &env{t: t, st: st, box: box, now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC), setup: "setup-token-value"}
-	au, _ := url.Parse(authBase)
-	pu, _ := url.Parse(portalBase)
+	au, err := url.Parse(rawAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pu, err := url.Parse(rawPortal)
+	if err != nil {
+		t.Fatal(err)
+	}
 	icons := fstest.MapFS{
 		"alpha.svg":     {Data: []byte("<svg/>")},
 		"sub/inner.svg": {Data: []byte("<svg/>")},
@@ -1424,5 +1435,113 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 	rr := e.browser().request("GET", authBase+pathLogin, nil, nil)
 	if strings.Contains(rr.Body.String(), `content="no-referrer"`) || rr.Header().Get("Referrer-Policy") == "no-referrer" {
 		t.Error("auth pages still use no-referrer")
+	}
+}
+
+func TestCanonicalOrigins(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		authURL   string
+		portalURL string
+	}{
+		{"uppercase", "https://Auth.Example.com", "https://Tabs.Example.com"},
+		{"trailing dot", "https://auth.example.com.", "https://tabs.example.com."},
+		{"explicit 443", "https://auth.example.com:443", "https://tabs.example.com:443"},
+		{"combined", "https://Auth.Example.com.:443", "https://TABS.Example.com.:443"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnvWithURLs(t, tt.authURL, tt.portalURL)
+			if e.s.authOrigin != authBase {
+				t.Errorf("authOrigin = %q, want %q", e.s.authOrigin, authBase)
+			}
+			if e.s.portal != portalBase {
+				t.Errorf("portal = %q, want %q", e.s.portal, portalBase)
+			}
+			e.user("bob", false, "users")
+			b := e.browser()
+
+			// Browser login POST sends canonical Origin even when configured URLs were not.
+			rr := b.login("bob", "password-for-bob")
+			if rr.Code != http.StatusOK || b.lastURL != portalBase+"/" {
+				t.Fatalf("login ended at %s (%d)\n%s", b.lastURL, rr.Code, rr.Body.String())
+			}
+
+			// Portal logout POST with canonical Origin succeeds and redirects to canonical auth origin.
+			csrf := b.csrf()
+			b.follow("POST", portalBase+pathLogout, url.Values{"csrf": {csrf}})
+			if b.lastURL != authBase+pathLoggedOut || b.last.Code != http.StatusOK {
+				t.Fatalf("logout ended at %s (%d)", b.lastURL, b.last.Code)
+			}
+		})
+	}
+}
+
+func TestSameOriginCanonicalHost(t *testing.T) {
+	e := newEnvWithURLs(t, "https://Auth.Example.com.:443", "https://Tabs.Example.com.:443")
+	e.user("bob", false, "users")
+	form := url.Values{"username": {"bob"}, "password": {"password-for-bob"}}
+
+	for _, host := range []string{
+		"Auth.Example.com",
+		"auth.example.com.",
+		"auth.example.com:443",
+		"AUTH.EXAMPLE.COM.:443",
+	} {
+		t.Run("login POST host="+host, func(t *testing.T) {
+			rr := e.browser().request("POST", "https://"+host+pathLogin, form, map[string]string{
+				"Origin":         "null",
+				"Sec-Fetch-Site": "same-origin",
+			})
+			if rr.Code == http.StatusForbidden {
+				t.Errorf("POST with Host=%q, Origin=null, Sec-Fetch-Site=same-origin got 403", host)
+			}
+			if rr.Code != http.StatusSeeOther {
+				t.Errorf("POST status = %d, want %d", rr.Code, http.StatusSeeOther)
+			}
+		})
+	}
+
+	t.Run("portal logout POST non-canonical host", func(t *testing.T) {
+		b := e.browser()
+		rr := b.login("bob", "password-for-bob")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("login = %d", rr.Code)
+		}
+		csrf := b.csrf()
+		nonCanonHost := "Tabs.Example.com.:443"
+		b.cookies[nonCanonHost] = b.cookies["tabs.example.com"]
+		rr = b.request("POST", "https://"+nonCanonHost+pathLogout, url.Values{"csrf": {csrf}}, map[string]string{
+			"Origin":         "null",
+			"Sec-Fetch-Site": "same-origin",
+		})
+		if rr.Code != http.StatusSeeOther {
+			t.Errorf("portal logout status = %d, want %d", rr.Code, http.StatusSeeOther)
+		}
+	})
+
+	for _, tt := range []struct {
+		name    string
+		host    string
+		allowed []string
+		want    bool
+	}{
+		{"uppercase", "Auth.Example.com", []string{authBase}, true},
+		{"trailing dot", "auth.example.com.", []string{authBase}, true},
+		{"explicit 443", "auth.example.com:443", []string{authBase}, true},
+		{"combined", "AUTH.EXAMPLE.COM.:443", []string{authBase}, true},
+		{"wrong host", "Evil.Example.com:443", []string{authBase}, false},
+		{"empty host rejected even if scheme-only allowed", "", []string{"https://", authBase}, false},
+		{"invalid port rejected", "auth.example.com:99999", []string{"https://", authBase}, false},
+		{"invalid host rejected", "bad host", []string{"https://", authBase}, false},
+	} {
+		t.Run("sameOrigin "+tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Host = tt.host
+			req.Header.Set("Origin", "null")
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			if got := sameOrigin(req, tt.allowed...); got != tt.want {
+				t.Errorf("sameOrigin(Host=%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
 	}
 }

@@ -1417,3 +1417,47 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 		t.Error("auth pages still use no-referrer")
 	}
 }
+
+func TestHandoffRejectsHead(t *testing.T) {
+	e := newEnv(t)
+	e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+
+	// Start a real handoff flow so the query parameters and auth cookie are valid.
+	start := b.request("GET", portalBase+pathAuthStart+"?rd=/alpha/", nil, nil)
+	if start.Code != http.StatusFound {
+		t.Fatalf("start = %d", start.Code)
+	}
+	handoffURL := start.Header().Get("Location")
+
+	// Fill the session's live code cap so any code written by HEAD would evict
+	// the oldest code.
+	var firstCode string
+	for i := range maxLiveCodes {
+		rr := b.request("GET", handoffURL, nil, nil)
+		if rr.Code != http.StatusFound {
+			t.Fatalf("handoff %d = %d", i, rr.Code)
+		}
+		if i == 0 {
+			firstCode = mustQuery(t, rr.Header().Get("Location")).Get("code")
+		}
+		e.now = e.now.Add(time.Millisecond)
+	}
+
+	rr := b.request("HEAD", handoffURL, nil, nil)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("HEAD handoff = %d, want %d", rr.Code, http.StatusMethodNotAllowed)
+	}
+	if got := rr.Header().Get("Allow"); got != http.MethodGet {
+		t.Errorf("Allow = %q, want %q", got, http.MethodGet)
+	}
+	if loc := rr.Header().Get("Location"); loc != "" {
+		t.Errorf("HEAD handoff returned Location %q", loc)
+	}
+	// The oldest code must still exist: HEAD neither created a new code nor
+	// evicted an existing one.
+	if _, err := e.st.ConsumeCode(auth.HashToken(firstCode), e.now); err != nil {
+		t.Errorf("oldest handoff code missing after HEAD: %v", err)
+	}
+}

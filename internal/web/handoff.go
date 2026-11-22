@@ -64,7 +64,7 @@ func (s *Server) serveStart(w http.ResponseWriter, r *http.Request, host string)
 
 // serveHandoff issues a code for a logged-in user (auth host).
 func (s *Server) serveHandoff(w http.ResponseWriter, r *http.Request, st *state) {
-	if !allow(w, r, "GET", "HEAD") {
+	if !allow(w, r, "GET") {
 		return
 	}
 	q := r.URL.Query()

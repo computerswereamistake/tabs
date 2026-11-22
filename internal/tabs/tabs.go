@@ -174,8 +174,8 @@ func checkURL(s string) error {
 	if u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return fmt.Errorf("%q must be a path starting with / or an absolute https:// URL", s)
 	}
-	if !hostRE.MatchString(u.Hostname()) {
-		return fmt.Errorf("%q: host %q must be a plain hostname", s, u.Hostname())
+	if !hostRE.MatchString(u.Hostname()) || CanonicalHost(u.Host) == "" {
+		return fmt.Errorf("%q: host %q must be a plain hostname with an optional valid port", s, u.Host)
 	}
 	return nil
 }
@@ -226,16 +226,21 @@ func CanonicalHost(h string) string {
 	return host + ":" + port
 }
 
-// FrameOrigins returns the distinct origins of absolute tab URLs, in config
-// order, for use in a CSP frame-src directive. Relative URLs are skipped.
+// FrameOrigins returns the distinct canonical origins of absolute tab URLs, in
+// config order, for use in a CSP frame-src directive. Relative URLs and tabs
+// without a valid canonical host are skipped.
 func (c Config) FrameOrigins() []string {
 	var out []string
 	for _, t := range c.Tabs {
-		u, err := url.Parse(t.URL)
-		if err != nil || !u.IsAbs() || u.Host == "" {
+		h := t.Host()
+		if h == "" {
 			continue
 		}
-		o := u.Scheme + "://" + u.Host
+		u, err := url.Parse(t.URL)
+		if err != nil || !u.IsAbs() {
+			continue
+		}
+		o := u.Scheme + "://" + h
 		if !slices.Contains(out, o) {
 			out = append(out, o)
 		}

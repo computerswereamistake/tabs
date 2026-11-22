@@ -913,9 +913,12 @@ func TestSecurityHeaders(t *testing.T) {
 		"frame-src 'self' https://beta.example.com; base-uri 'none'; form-action 'self' https://auth.example.com; frame-ancestors 'none'"
 	authCSP := "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; " +
 		"form-action 'self' https://tabs.example.com https://beta.example.com; frame-ancestors 'none'"
+	iconCSP := "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox"
 	for _, tt := range []struct{ url, csp, referrer string }{
 		{portalBase + "/", portalCSP, "same-origin"},
 		{portalBase + "/_tabs/static/app.css", portalCSP, "same-origin"},
+		{portalBase + "/_tabs/icons/alpha.svg", iconCSP, "same-origin"},
+		{portalBase + "/_tabs/icons/phish.html", iconCSP, "same-origin"},
 		{portalBase + "/nope", portalCSP, "same-origin"},
 		{authBase + pathLogin, authCSP, "same-origin"},
 		{authBase + "/nope", authCSP, "same-origin"},

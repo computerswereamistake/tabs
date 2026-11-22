@@ -92,6 +92,7 @@ type state struct {
 	portalCSP  string
 	authCSP    string
 	appCSP     string
+	iconCSP    string
 	gated      map[string]bool // canonical hosts that get gate cookies: portal + tab hosts
 	tabOrigins []string
 }
@@ -292,6 +293,9 @@ func (s *Server) SetConfig(cfg tabs.Config) error {
 		authCSP: "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; " +
 			"form-action " + formTargets + "; frame-ancestors 'none'",
 		appCSP: "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+		// Icons may be SVGs; sandbox them so navigating directly to one cannot
+		// load scripts (even same-origin ones) or run in the portal's origin.
+		iconCSP: "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox",
 	}
 	s.state.Store(st)
 	return nil
@@ -599,6 +603,7 @@ func (s *Server) routePortal(w http.ResponseWriter, r *http.Request, st *state, 
 			serveFile(w, r, s.static, strings.TrimPrefix(p, prefixStatic))
 		}
 	case strings.HasPrefix(p, prefixIcons):
+		w.Header().Set("Content-Security-Policy", st.iconCSP)
 		if !allow(w, r, "GET", "HEAD") {
 			return
 		}

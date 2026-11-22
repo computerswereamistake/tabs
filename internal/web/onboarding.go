@@ -135,7 +135,7 @@ func (s *Server) serveSetup(w http.ResponseWriter, r *http.Request, st *state) {
 	if !ok {
 		return
 	}
-	u.PasswordHash, err = auth.HashPassword(pw)
+	u.PasswordHash, err = auth.HashPassword(r.Context(), pw)
 	release()
 	if err != nil {
 		s.fail(w, r, err)
@@ -202,7 +202,7 @@ func (s *Server) serveInvite(w http.ResponseWriter, r *http.Request, st *state) 
 	if !ok {
 		return
 	}
-	u.PasswordHash, err = auth.HashPassword(pw)
+	u.PasswordHash, err = auth.HashPassword(r.Context(), pw)
 	release()
 	if err != nil {
 		s.fail(w, r, err)
@@ -278,7 +278,7 @@ func (s *Server) serveReset(w http.ResponseWriter, r *http.Request, st *state) {
 	if !ok {
 		return
 	}
-	hash, err := auth.HashPassword(pw)
+	hash, err := auth.HashPassword(r.Context(), pw)
 	release()
 	if err != nil {
 		s.fail(w, r, err)

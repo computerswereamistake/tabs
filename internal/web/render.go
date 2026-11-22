@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"html/template"
 	"net/http"
@@ -154,7 +155,11 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 }
 
 // fail logs an unexpected error and answers 500 without details.
+// A canceled or timed-out request context returns without logging an error.
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
 	s.log.Error("internal error", "path", redactPath(r.URL.Path), "err", err)
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }

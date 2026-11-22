@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -91,7 +93,7 @@ func newEnv(t *testing.T) *env {
 // user creates an account with password "password-for-<name>".
 func (e *env) user(name string, admin bool, groups ...string) store.User {
 	e.t.Helper()
-	h, err := auth.HashPassword("password-for-" + name)
+	h, err := auth.HashPassword(e.t.Context(), "password-for-"+name)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -1415,5 +1417,68 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 	rr := e.browser().request("GET", authBase+pathLogin, nil, nil)
 	if strings.Contains(rr.Body.String(), `content="no-referrer"`) || rr.Header().Get("Referrer-Policy") == "no-referrer" {
 		t.Error("auth pages still use no-referrer")
+	}
+}
+
+func TestCanceledLoginDoesNotFailOrLogError(t *testing.T) {
+	e := newEnv(t)
+	var logBuf bytes.Buffer
+	e.s.log = slog.New(slog.NewTextHandler(&logBuf, nil))
+	e.user("bob", false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	form := url.Values{"username": {"bob"}, "password": {"password-for-bob"}}
+	req := httptest.NewRequest(http.MethodPost, authBase+pathLogin, strings.NewReader(form.Encode())).WithContext(ctx)
+	req.RemoteAddr = proxyAddr
+	req.Header.Set("X-Forwarded-For", clientIP)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", authBase)
+	rr := httptest.NewRecorder()
+	e.s.ServeHTTP(rr, req)
+
+	if strings.Contains(logBuf.String(), "internal error") {
+		t.Errorf("canceled login logged internal error: %s", logBuf.String())
+	}
+	if e.s.pairLimit.Has(clientIP + "|bob") {
+		t.Error("canceled login was counted as a failed attempt")
+	}
+	if len(e.s.inFlight) != 0 {
+		t.Errorf("in-flight slots leaked: %v", e.s.inFlight)
+	}
+
+	// Same check on recheckPassword via /_tabs/account password change.
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.request(http.MethodGet, authBase+pathAccount, nil, nil)
+	csrf := b.csrf()
+
+	pwForm := url.Values{
+		"action":  {"password"},
+		"csrf":    {csrf},
+		"current": {"password-for-bob"},
+		"new":     {"brand new password"},
+		"confirm": {"brand new password"},
+	}
+	req2 := httptest.NewRequest(http.MethodPost, authBase+pathAccount, strings.NewReader(pwForm.Encode())).WithContext(ctx)
+	req2.RemoteAddr = proxyAddr
+	req2.Header.Set("X-Forwarded-For", clientIP)
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.Header.Set("Origin", authBase)
+	for name, v := range b.cookies["auth.example.com"] {
+		req2.AddCookie(&http.Cookie{Name: name, Value: v})
+	}
+	rr2 := httptest.NewRecorder()
+	e.s.ServeHTTP(rr2, req2)
+
+	if strings.Contains(logBuf.String(), "internal error") {
+		t.Errorf("canceled recheck logged internal error: %s", logBuf.String())
+	}
+	if e.s.pairLimit.Has(clientIP + "|bob") {
+		t.Error("canceled recheck was counted as a failed attempt")
+	}
+	if len(e.s.inFlight) != 0 {
+		t.Errorf("in-flight slots leaked after recheck: %v", e.s.inFlight)
 	}
 }

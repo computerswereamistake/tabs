@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/base32"
 	"errors"
 	"strings"
@@ -9,26 +10,28 @@ import (
 )
 
 func TestPasswordRoundTrip(t *testing.T) {
-	h, err := HashPassword("correct horse battery")
+	ctx := t.Context()
+	h, err := HashPassword(ctx, "correct horse battery")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(h, "$argon2id$v=19$m=65536,t=3,p=2$") {
 		t.Fatalf("unexpected hash format %q", h)
 	}
-	if ok, err := VerifyPassword(h, "correct horse battery"); !ok || err != nil {
+	if ok, err := VerifyPassword(ctx, h, "correct horse battery"); !ok || err != nil {
 		t.Errorf("right password rejected: %v", err)
 	}
-	if ok, _ := VerifyPassword(h, "correct horse batterY"); ok {
+	if ok, _ := VerifyPassword(ctx, h, "correct horse batterY"); ok {
 		t.Error("wrong password accepted")
 	}
-	h2, _ := HashPassword("correct horse battery")
+	h2, _ := HashPassword(ctx, "correct horse battery")
 	if h == h2 {
 		t.Error("two hashes of the same password are equal; salt not random")
 	}
 }
 
 func TestVerifyPasswordRejectsBadHashes(t *testing.T) {
+	ctx := t.Context()
 	for _, h := range []string{
 		"",
 		"plain",
@@ -36,29 +39,38 @@ func TestVerifyPasswordRejectsBadHashes(t *testing.T) {
 		"$argon2id$v=18$m=65536,t=3,p=2$c2FsdA$a2V5",
 		"$argon2id$v=19$m=99999999,t=3,p=2$c2FsdA$a2V5", // memory bomb
 		"$argon2id$v=19$m=65536,t=3,p=0$c2FsdA$a2V5",
+		"$argon2id$v=19$m=65536,t=3,p=9$c2FsdA$a2V5",   // too many threads (> 4*argonThreads)
+		"$argon2id$v=19$m=65536,t=3,p=255$c2FsdA$a2V5", // thread bomb
 		"$argon2id$v=19$m=65536,t=3,p=2$!!$a2V5",
 		"$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$",
 	} {
-		if ok, _ := VerifyPassword(h, "x"); ok {
+		if _, ok := parseHash(h); ok {
+			t.Errorf("parseHash(%q) = true", h)
+		}
+		if ok, _ := VerifyPassword(ctx, h, "x"); ok {
 			t.Errorf("VerifyPassword(%q) = true", h)
 		}
+	}
+	if _, ok := parseHash("$argon2id$v=19$m=65536,t=3,p=8$c2FsdA$a2V5"); !ok {
+		t.Error("parseHash rejected p=8 (4*argonThreads)")
 	}
 }
 
 func TestDummyHashParses(t *testing.T) {
 	// The dummy must cost a full hash: a parse failure would return early
 	// and make unknown usernames measurably faster.
+	ctx := t.Context()
 	parts := strings.Split(dummyHash, "$")
 	if len(parts) != 6 {
 		t.Fatal("dummy hash malformed")
 	}
 	start := time.Now()
-	if ok, err := VerifyPassword("", "x"); ok || err != nil {
+	if ok, err := VerifyPassword(ctx, "", "x"); ok || err != nil {
 		t.Fatalf("empty hash: ok=%v err=%v", ok, err)
 	}
-	h, _ := HashPassword("y")
+	h, _ := HashPassword(ctx, "y")
 	startReal := time.Now()
-	_, _ = VerifyPassword(h, "x")
+	_, _ = VerifyPassword(ctx, h, "x")
 	if dummy, real := startReal.Sub(start), time.Since(startReal); dummy < real/3 {
 		t.Errorf("dummy verify took %v, real %v", dummy, real)
 	}
@@ -76,8 +88,57 @@ func TestBusy(t *testing.T) {
 			<-hashSlots
 		}
 	}()
-	if _, err := HashPassword("whatever whatever"); !errors.Is(err, ErrBusy) {
+	if _, err := HashPassword(t.Context(), "whatever whatever"); !errors.Is(err, ErrBusy) {
 		t.Fatalf("err = %v, want ErrBusy", err)
+	}
+}
+
+func TestHashContextCanceled(t *testing.T) {
+	// Already-canceled context returns immediately even when slots are free.
+	canceled, cancelNow := context.WithCancel(t.Context())
+	cancelNow()
+	if _, err := HashPassword(canceled, "whatever whatever"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("HashPassword(canceled) err = %v, want context.Canceled", err)
+	}
+	if _, err := VerifyPassword(canceled, dummyHash, "whatever whatever"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("VerifyPassword(canceled) err = %v, want context.Canceled", err)
+	}
+
+	// Fill all hash slots; canceling while queued must abort well before hashWait.
+	for range cap(hashSlots) {
+		hashSlots <- struct{}{}
+	}
+	defer func() {
+		for range cap(hashSlots) {
+			<-hashSlots
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := HashPassword(ctx, "whatever whatever")
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("HashPassword queued err = %v, want context.Canceled", err)
+	}
+	if elapsed >= hashWait/2 {
+		t.Fatalf("HashPassword waited %v (hashWait=%v), did not abort on cancel", elapsed, hashWait)
+	}
+
+	tctx, tcancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer tcancel()
+	start = time.Now()
+	ok, err := VerifyPassword(tctx, "", "whatever whatever")
+	elapsed = time.Since(start)
+	if ok || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("VerifyPassword queued = (%v, %v), want (false, context.DeadlineExceeded)", ok, err)
+	}
+	if elapsed >= hashWait/2 {
+		t.Fatalf("VerifyPassword waited %v (hashWait=%v), did not abort on deadline", elapsed, hashWait)
 	}
 }
 

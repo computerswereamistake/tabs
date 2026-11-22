@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -46,15 +47,23 @@ var (
 // 503 rather than queue without bound.
 var ErrBusy = errors.New("too many password checks in progress")
 
-func argonKey(password string, salt []byte, t, memory uint32, threads uint8, keyLen uint32) ([]byte, error) {
+func argonKey(ctx context.Context, password string, salt []byte, t, memory uint32, threads uint8, keyLen uint32) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	timer := time.NewTimer(hashWait)
 	defer timer.Stop()
 	select {
 	case hashSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-timer.C:
 		return nil, ErrBusy
 	}
 	defer func() { <-hashSlots }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return argon2.IDKey([]byte(password), salt, t, memory, threads, keyLen), nil
 }
 
@@ -78,12 +87,15 @@ func CheckPassword(password, username string) error {
 }
 
 // HashPassword returns an argon2id hash in PHC string format.
-func HashPassword(password string) (string, error) {
+func HashPassword(ctx context.Context, password string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	key, err := argonKey(password, salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	key, err := argonKey(ctx, password, salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	if err != nil {
 		return "", err
 	}
@@ -99,13 +111,13 @@ var dummyHash = "$argon2id$v=19$m=65536,t=3,p=2$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAA
 
 // VerifyPassword reports whether password matches hash. An empty hash (no
 // such user, or a disabled one) is checked against a dummy hash so timing
-// doesn't reveal which, and always fails. The only error is ErrBusy.
-func VerifyPassword(hash, password string) (bool, error) {
+// doesn't reveal which, and always fails. Errors are ErrBusy or ctx.Err().
+func VerifyPassword(ctx context.Context, hash, password string) (bool, error) {
 	if hash == "" {
-		_, err := verify(dummyHash, password)
+		_, err := verify(ctx, dummyHash, password)
 		return false, err
 	}
-	return verify(hash, password)
+	return verify(ctx, hash, password)
 }
 
 type argonParams struct {
@@ -116,7 +128,7 @@ type argonParams struct {
 
 // parseHash reads a PHC argon2id string. It refuses parameters far outside
 // what HashPassword writes, so a tampered record can't make one login
-// allocate gigabytes.
+// allocate gigabytes or spawn excessive goroutines.
 func parseHash(hash string) (argonParams, bool) {
 	var p argonParams
 	parts := strings.Split(hash, "$")
@@ -131,7 +143,7 @@ func parseHash(hash string) (argonParams, bool) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memory, &p.time, &p.threads); err != nil {
 		return p, false
 	}
-	if p.memory == 0 || p.memory > 4*argonMemory || p.time == 0 || p.time > 4*argonTime || p.threads == 0 {
+	if p.memory == 0 || p.memory > 4*argonMemory || p.time == 0 || p.time > 4*argonTime || p.threads == 0 || p.threads > 4*argonThreads {
 		return p, false
 	}
 	b64 := base64.RawStdEncoding
@@ -146,12 +158,12 @@ func parseHash(hash string) (argonParams, bool) {
 }
 
 // verify checks password against hash. A malformed hash is a failed match.
-func verify(hash, password string) (bool, error) {
+func verify(ctx context.Context, hash, password string) (bool, error) {
 	p, ok := parseHash(hash)
 	if !ok {
 		return false, nil
 	}
-	got, err := argonKey(password, p.salt, p.time, p.memory, p.threads, uint32(len(p.key))) // #nosec G115 -- len(key) <= 64
+	got, err := argonKey(ctx, password, p.salt, p.time, p.memory, p.threads, uint32(len(p.key))) // #nosec G115 -- len(key) <= 64
 	if err != nil {
 		return false, err
 	}

@@ -262,7 +262,11 @@ func sameOrigin(r *http.Request, allowed ...string) bool {
 		if sfs != "same-origin" {
 			return false
 		}
-		return slices.Contains(allowed, "https://"+r.Host) || slices.Contains(allowed, "http://"+r.Host)
+		host := tabs.CanonicalHost(r.Host)
+		if host == "" {
+			return false
+		}
+		return slices.Contains(allowed, "https://"+host) || slices.Contains(allowed, "http://"+host)
 	}
 	if sfs != "" && sfs != "same-origin" && sfs != "same-site" && sfs != "none" {
 		return false

@@ -206,7 +206,7 @@ func (s *Server) accountPassword(c *accountCtx) result {
 	if !ok {
 		return handled
 	}
-	hash, err := auth.HashPassword(pw)
+	hash, err := s.hashPassword(pw)
 	release()
 	if err != nil {
 		return s.failResult(c.w, c.r, err)
@@ -439,10 +439,9 @@ func (s *Server) recheckPassword(c *accountCtx) (result, bool) {
 		return refuse(http.StatusTooManyRequests, msg), false
 	}
 	defer s.release(ip)
-	ok, err := auth.VerifyPassword(c.a.user.PasswordHash, c.r.PostFormValue("current"))
-	if errors.Is(err, auth.ErrBusy) {
-		http.Error(c.w, "busy; try again in a moment", http.StatusServiceUnavailable)
-		return handled, false
+	ok, err := s.verifyPassword(c.a.user.PasswordHash, c.r.PostFormValue("current"))
+	if err != nil {
+		return s.failResult(c.w, c.r, err), false
 	}
 	if !ok {
 		s.failed(c.r, c.a.user.Username, ip, 0, "reauth-failed")

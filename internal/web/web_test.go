@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1416,4 +1418,167 @@ func TestOriginNullSameOriginPost(t *testing.T) {
 	if strings.Contains(rr.Body.String(), `content="no-referrer"`) || rr.Header().Get("Referrer-Policy") == "no-referrer" {
 		t.Error("auth pages still use no-referrer")
 	}
+}
+
+func TestErrBusyReturns503(t *testing.T) {
+	checkBusy := func(t *testing.T, rr *httptest.ResponseRecorder, logs *bytes.Buffer, e *env) {
+		t.Helper()
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want %d\n%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+		}
+		if got := rr.Header().Get("Retry-After"); got != "2" {
+			t.Errorf("Retry-After = %q, want %q", got, "2")
+		}
+		if !strings.Contains(rr.Body.String(), "busy; try again in a moment") {
+			t.Errorf("body = %q, want busy message", rr.Body.String())
+		}
+		if strings.Contains(logs.String(), "internal error") {
+			t.Errorf("unexpected internal error log:\n%s", logs.String())
+		}
+		if len(e.s.inFlight) != 0 {
+			t.Errorf("leaked in-flight slots: %v", e.s.inFlight)
+		}
+	}
+
+	newLoggedEnv := func(t *testing.T) (*env, *bytes.Buffer) {
+		t.Helper()
+		e := newEnv(t)
+		var logs bytes.Buffer
+		e.s.log = slog.New(slog.NewTextHandler(&logs, nil))
+		return e, &logs
+	}
+
+	t.Run("fail and adminErr", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		req := httptest.NewRequest(http.MethodPost, authBase+pathSetup, nil)
+
+		rr := httptest.NewRecorder()
+		e.s.fail(rr, req, auth.ErrBusy)
+		checkBusy(t, rr, logs, e)
+
+		rr = httptest.NewRecorder()
+		e.s.fail(rr, req, fmt.Errorf("hash: %w", auth.ErrBusy))
+		checkBusy(t, rr, logs, e)
+
+		rr = httptest.NewRecorder()
+		if res := e.s.adminErr(&adminCtx{w: rr, r: req}, auth.ErrBusy); !res.written {
+			t.Errorf("adminErr(ErrBusy) written = false")
+		}
+		checkBusy(t, rr, logs, e)
+
+		rr = httptest.NewRecorder()
+		e.s.fail(rr, req, errors.New("boom"))
+		if rr.Code != http.StatusInternalServerError {
+			t.Errorf("unexpected error status = %d, want %d", rr.Code, http.StatusInternalServerError)
+		}
+		if got := rr.Header().Get("Retry-After"); got != "" {
+			t.Errorf("unexpected error Retry-After = %q, want empty", got)
+		}
+		if !strings.Contains(logs.String(), "internal error") {
+			t.Errorf("expected internal error log, got %q", logs.String())
+		}
+	})
+
+	t.Run("setup", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		b := e.browser()
+		b.follow(http.MethodGet, authBase+pathSetup+"?token="+e.setup, nil)
+		e.s.hashPassword = func(string) (string, error) { return "", auth.ErrBusy }
+		rr := b.request(http.MethodPost, authBase+pathSetup, url.Values{
+			"username": {"root"}, "name": {"Root"}, "password": {"a long enough password"}, "confirm": {"a long enough password"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+		if e.s.setupOpen() == "" {
+			t.Error("setup token consumed on busy error")
+		}
+		if _, err := e.st.UserByName("root"); err == nil {
+			t.Error("admin created despite busy error")
+		}
+	})
+
+	t.Run("invite", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		tok, _ := auth.NewToken()
+		_ = e.st.CreateInvite(store.Invite{Hash: auth.HashToken(tok), ExpiresAt: e.now.Add(time.Hour), MaxUses: 1})
+		b := e.browser()
+		b.follow(http.MethodGet, authBase+pathInvite+"/"+tok, nil)
+		e.s.hashPassword = func(string) (string, error) { return "", auth.ErrBusy }
+		rr := b.request(http.MethodPost, authBase+pathInvite, url.Values{
+			"username": {"newbie"}, "name": {"New"}, "password": {"a good long password"}, "confirm": {"a good long password"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+		if _, err := e.st.UserByName("newbie"); err == nil {
+			t.Error("user created despite busy error")
+		}
+	})
+
+	t.Run("reset", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		bob := e.user("bob", false)
+		tok, _ := auth.NewToken()
+		_ = e.st.CreateReset(store.Reset{Hash: auth.HashToken(tok), UserID: bob.ID, ExpiresAt: e.now.Add(time.Hour)})
+		b := e.browser()
+		b.follow(http.MethodGet, authBase+pathReset+"/"+tok, nil)
+		e.s.hashPassword = func(string) (string, error) { return "", auth.ErrBusy }
+		rr := b.request(http.MethodPost, authBase+pathReset, url.Values{
+			"password": {"brand new password"}, "confirm": {"brand new password"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+		if _, err := e.st.Reset(auth.HashToken(tok), e.now); err != nil {
+			t.Errorf("reset token consumed on busy error: %v", err)
+		}
+	})
+
+	t.Run("accountPassword", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		e.user("bob", false)
+		b := e.browser()
+		b.login("bob", "password-for-bob")
+		b.follow(http.MethodGet, authBase+pathAccount, nil)
+		e.s.hashPassword = func(string) (string, error) { return "", auth.ErrBusy }
+		rr := b.request(http.MethodPost, authBase+pathAccount, url.Values{
+			"csrf": {b.csrf()}, "action": {"password"}, "current": {"password-for-bob"},
+			"new": {"my own new password"}, "confirm": {"my own new password"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+	})
+
+	t.Run("adminCreateUser", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		e.user("ann", true)
+		b := e.browser()
+		b.login("ann", "password-for-ann")
+		b.follow(http.MethodGet, authBase+pathAdmin+"/users", nil)
+		e.s.hashPassword = func(string) (string, error) { return "", auth.ErrBusy }
+		rr := b.request(http.MethodPost, authBase+pathAdmin+"/users", url.Values{
+			"csrf": {b.csrf()}, "action": {"create"}, "username": {"carol"}, "password": {"temporary password"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+		if _, err := e.st.UserByName("carol"); err == nil {
+			t.Error("user created despite busy error")
+		}
+	})
+
+	t.Run("login", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		e.user("bob", false)
+		e.s.verifyPassword = func(string, string) (bool, error) { return false, auth.ErrBusy }
+		rr := e.browser().request(http.MethodPost, authBase+pathLogin, url.Values{
+			"username": {"bob"}, "password": {"password-for-bob"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+	})
+
+	t.Run("recheckPassword", func(t *testing.T) {
+		e, logs := newLoggedEnv(t)
+		e.user("bob", false)
+		b := e.browser()
+		b.login("bob", "password-for-bob")
+		b.follow(http.MethodGet, authBase+pathAccount, nil)
+		e.s.verifyPassword = func(string, string) (bool, error) { return false, auth.ErrBusy }
+		rr := b.request(http.MethodPost, authBase+pathAccount, url.Values{
+			"csrf": {b.csrf()}, "action": {"totp-begin"}, "current": {"password-for-bob"},
+		}, nil)
+		checkBusy(t, rr, logs, e)
+	})
 }

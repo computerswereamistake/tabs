@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/computerswereamistake/tabs/internal/auth"
 	"github.com/computerswereamistake/tabs/internal/store"
 )
 
@@ -126,7 +127,7 @@ func refuse(status int, msg string) result { return result{status: status, err: 
 // handled means the action wrote the response itself.
 var handled = result{written: true}
 
-// failResult logs an unexpected error, answers 500 and returns handled.
+// failResult delegates to fail and returns handled.
 func (s *Server) failResult(w http.ResponseWriter, r *http.Request, err error) result {
 	s.fail(w, r, err)
 	return handled
@@ -153,8 +154,14 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 	s.render(w, r, status, "message", s.newPage(heading, nil, messageData{Text: text}))
 }
 
-// fail logs an unexpected error and answers 500 without details.
+// fail answers 503 for auth.ErrBusy, or logs an unexpected error and answers
+// 500 without details.
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, auth.ErrBusy) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "busy; try again in a moment", http.StatusServiceUnavailable)
+		return
+	}
 	s.log.Error("internal error", "path", redactPath(r.URL.Path), "err", err)
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }

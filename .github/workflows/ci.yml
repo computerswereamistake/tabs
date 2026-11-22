@@ -5,12 +5,16 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Releasing is manual: run this workflow on main from the Actions tab.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The event is in the group so a push to main can't replace a queued
+  # release run.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   # Don't cancel a main run part-way through publishing a release.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -58,10 +62,12 @@ jobs:
       - name: gosec
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 -quiet ./...
 
-  # On main, works out the next release from Conventional Commit messages
-  # since the last tag (see .github/scripts/next-version.sh); empty if none.
+  # On a manual run on main, works out the next release from Conventional
+  # Commit messages since the last tag (see .github/scripts/next-version.sh);
+  # empty if none. Pushes to main only test and build, so merges batch up
+  # into one release.
   version:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     outputs:

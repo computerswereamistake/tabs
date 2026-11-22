@@ -397,7 +397,7 @@ func TestCookieAttributes(t *testing.T) {
 
 func TestVerify(t *testing.T) {
 	e := newEnv(t)
-	e.user("bob", false, "users")
+	bobUser := e.user("bob", false, "users")
 	e.user("ann", true, "admins")
 	bob := e.browser()
 	bob.login("bob", "password-for-bob")
@@ -486,6 +486,26 @@ func TestVerify(t *testing.T) {
 	if rr := ann.verify("gamma", "tabs.example.com", nil); rr.Code == http.StatusOK {
 		t.Error("beta's gate accepted on the portal")
 	}
+
+	t.Run("email header", func(t *testing.T) {
+		rr := bob.verify("alpha", "tabs.example.com", map[string]string{"Remote-Email": "spoofed@example.com"})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d", rr.Code)
+		}
+		if _, ok := rr.Header()["Remote-Email"]; ok {
+			t.Errorf("Remote-Email set when user has no email: %q", rr.Header().Get("Remote-Email"))
+		}
+		if _, err := e.st.UpdateUser(bobUser.ID, func(u *store.User) error { u.Email = "bob@example.com"; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		rr = bob.verify("alpha", "tabs.example.com", nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d", rr.Code)
+		}
+		if got := rr.Header().Get("Remote-Email"); got != "bob@example.com" {
+			t.Errorf("Remote-Email = %q, want %q", got, "bob@example.com")
+		}
+	})
 }
 
 func TestRevocationIsImmediate(t *testing.T) {

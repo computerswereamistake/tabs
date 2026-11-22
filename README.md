@@ -35,10 +35,10 @@ obtained is useless to you, so nobody can log you in as them.
 For each app request, Caddy's `forward_auth` asks
 `/_tabs/auth/verify?tab=<slug>`. Tabs checks the gate, its session and the
 user's groups against that tab, and answers `200` with `Remote-User`,
-`Remote-Name`, `Remote-Email` and `Remote-Groups`, `403`, or (for page loads
-only) a redirect into the handoff. Each Caddy route names its tab: tabs never
-works out the tab from the URL, because its idea of `..` or `%2f` could differ
-from Caddy's.
+`Remote-Name`, `Remote-Groups` and (when set) `Remote-Email`, `403`, or (for
+page loads only) a redirect into the handoff. Each Caddy route names its tab:
+tabs never works out the tab from the URL, because its idea of `..` or `%2f`
+could differ from Caddy's.
 
 ## Users, groups and two-factor login
 
@@ -303,9 +303,13 @@ other.example.com {                       # a tab with url: https://other.exampl
 }
 ```
 
-- `forward_auth` replaces any client-sent `Remote-*` headers named in
-  `copy_headers`, and `header_up X-Forwarded-Host {hostport}` keeps the
-  forwarded host to the one the browser used.
+- `forward_auth` replaces—and deletes when absent—any client-sent `Remote-*`
+  headers named in `copy_headers`, and `header_up X-Forwarded-Host {hostport}`
+  keeps the forwarded host to the one the browser used. Tabs omits
+  `Remote-Email` when a user has no email configured, so any other reverse
+  proxy calling `/_tabs/auth/verify` must strip client-supplied `Remote-*`
+  headers before forwarding, even when a header is absent from the verify
+  response (otherwise a client could spoof `Remote-Email`).
 - **Apps on the portal host trust each other.** They share one gate cookie;
   if the `request_header` line is ever wrong, a portal app's backend could
   replay a user's gate against other portal apps. Put apps you don't trust on

@@ -408,14 +408,18 @@ node --test internal/web/testdata/app.test.mjs
 ## CI and releases
 
 [GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, pull
-requests and `v*` tags: gofmt, `go mod tidy`, `go vet`, golangci-lint
+requests, `v*` tags and manual runs: gofmt, `go mod tidy`, `go vet`, golangci-lint
 ([config](.golangci.yml)), `go test -race` (including the JS tests),
 govulncheck and gosec, then builds the image for
 `linux/amd64` and `linux/arm64`. Only releases push the image.
 
-Releases are automatic. On each push to `main`, CI derives the next version
-from the [Conventional Commit](https://www.conventionalcommits.org/) messages
-since the last `vX.Y.Z` tag, publishes the image, then pushes the tag:
+Releases are manual, so several merges go out as one release. Pushes to
+`main` only test and build. To release, run the CI workflow on `main` from
+the Actions tab (or `gh workflow run ci.yml --ref main`). It derives the next
+version from the [Conventional Commit](https://www.conventionalcommits.org/)
+messages since the last `vX.Y.Z` tag, publishes the image, then pushes the
+tag. If no commit since that tag warrants a release, the run publishes
+nothing. The commit types decide the bump:
 
 | Commit message                                | Bump  |
 | --------------------------------------------- | ----- |

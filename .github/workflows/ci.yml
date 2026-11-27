@@ -5,14 +5,20 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Releasing is manual: run this workflow on main from the Actions tab.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Don't cancel a main run part-way through publishing a release.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # The event is in the group so a push to main can't replace a queued
+  # release run.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # Pushes to main don't publish, so a newer one cancels an older one.
+  # Release runs (manual runs and v* tags) are never cancelled part-way
+  # through publishing.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 # Actions are pinned to commit SHAs; Dependabot keeps them current.
 jobs:
@@ -58,10 +64,12 @@ jobs:
       - name: gosec
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 -quiet ./...
 
-  # On main, works out the next release from Conventional Commit messages
-  # since the last tag (see .github/scripts/next-version.sh); empty if none.
+  # On a manual run on main, works out the next release from Conventional
+  # Commit messages since the last tag (see .github/scripts/next-version.sh);
+  # empty if none. Pushes to main only test and build, so merges batch up
+  # into one release.
   version:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     outputs:
@@ -82,14 +90,18 @@ jobs:
 
   image:
     needs: [test, version]
-    # version is skipped off main; run anyway unless something failed.
+    # version is skipped except on a manual run on main; run anyway unless
+    # something failed.
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write # only used when publishing a release
     env:
-      PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') || needs.version.outputs.version != '' }}
+      # Only a pushed v* tag publishes as itself. A manual run on an old tag
+      # just builds, so it can't overwrite that tag's image or the floating
+      # major.minor tag.
+      PUBLISH: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || needs.version.outputs.version != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -163,7 +163,8 @@
           sessionExpired();
         }
       })
-      .then(function () { checking = false; });
+      .finally(function () { checking = false; })
+      .catch(function () {});
   }
 
   // Clicks and keys inside a frame never reach this page, so for same-origin

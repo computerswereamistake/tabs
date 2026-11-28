@@ -17,9 +17,18 @@ type Banner struct {
 	Duration time.Duration
 	Now      func() time.Time
 
+	maxEntries int // 0 uses maxEntries; overridden in tests
+
 	mu       sync.Mutex
 	failures map[string][]time.Time
 	bans     map[string]time.Time // ip -> banned until
+}
+
+func (b *Banner) limit() int {
+	if b.maxEntries > 0 {
+		return b.maxEntries
+	}
+	return maxEntries
 }
 
 // NewBanner returns a Banner. after <= 0 disables banning.
@@ -63,7 +72,8 @@ func (b *Banner) Fail(ip string) bool {
 		b.failures = make(map[string][]time.Time)
 		b.bans = make(map[string]time.Time)
 	}
-	if len(b.failures) >= maxEntries {
+	limit := b.limit()
+	if len(b.failures) >= limit {
 		b.pruneLocked(now)
 	}
 	fs := b.failures[ip]
@@ -73,6 +83,9 @@ func (b *Banner) Fail(ip string) bool {
 	}
 	fs = append(fs[cut:], now)
 	if len(fs) >= b.After {
+		if _, exists := b.bans[ip]; !exists && len(b.bans) >= limit {
+			b.evictBansLocked(now, limit)
+		}
 		b.bans[ip] = now.Add(b.Duration)
 		delete(b.failures, ip)
 		return true
@@ -100,13 +113,15 @@ func (b *Banner) Bans() []Ban {
 			out = append(out, Ban{IP: ip, Until: until})
 		}
 	}
-	slices.SortFunc(out, func(x, y Ban) int {
-		if c := x.Until.Compare(y.Until); c != 0 {
-			return c
-		}
-		return strings.Compare(x.IP, y.IP)
-	})
+	slices.SortFunc(out, compareBan)
 	return out
+}
+
+func compareBan(x, y Ban) int {
+	if c := x.Until.Compare(y.Until); c != 0 {
+		return c
+	}
+	return strings.Compare(x.IP, y.IP)
 }
 
 // Prune drops expired bans and stale failures.
@@ -127,7 +142,29 @@ func (b *Banner) pruneLocked(now time.Time) {
 			delete(b.failures, ip)
 		}
 	}
-	if len(b.failures) >= maxEntries {
+	if len(b.failures) >= b.limit() {
 		clear(b.failures)
+	}
+}
+
+func (b *Banner) evictBansLocked(now time.Time, limit int) {
+	for ip, until := range b.bans {
+		if !now.Before(until) {
+			delete(b.bans, ip)
+		}
+	}
+	if len(b.bans) < limit {
+		return
+	}
+	// Still full of active bans: drop a soonest-to-expire batch so newer
+	// bans stick and sustained sprays don't rescan the map on every insert.
+	all := make([]Ban, 0, len(b.bans))
+	for ip, until := range b.bans {
+		all = append(all, Ban{IP: ip, Until: until})
+	}
+	slices.SortFunc(all, compareBan)
+	drop := min(max(len(b.bans)-limit+1, limit/8), len(all))
+	for _, ban := range all[:drop] {
+		delete(b.bans, ban.IP)
 	}
 }

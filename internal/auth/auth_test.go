@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/base32"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -371,6 +372,105 @@ func TestBanner(t *testing.T) {
 	for range 100 {
 		if off.Fail("1.1.1.1") {
 			t.Fatal("disabled banner banned")
+		}
+	}
+}
+
+func TestBannerBoundsBans(t *testing.T) {
+	banIP := func(b *Banner, ip string) {
+		t.Helper()
+		for range b.After - 1 {
+			b.Fail(ip)
+		}
+		if !b.Fail(ip) {
+			t.Fatalf("expected %s to be banned", ip)
+		}
+	}
+
+	// Expired bans are pruned first without evicting active ones.
+	now := time.Unix(0, 0)
+	b := NewBanner(2, time.Minute, 10*time.Minute)
+	b.Now = func() time.Time { return now }
+	b.maxEntries = 4
+
+	banIP(b, "10.0.0.1") // expires at 10m
+	now = now.Add(5 * time.Minute)
+	banIP(b, "10.0.0.2") // expires at 15m
+	banIP(b, "10.0.0.3")
+	banIP(b, "10.0.0.4")
+
+	now = now.Add(6 * time.Minute) // t=11m: .1 expired, .2-.4 active
+	banIP(b, "10.0.0.5")
+	if len(b.bans) != 4 {
+		t.Fatalf("len(bans) = %d, want 4", len(b.bans))
+	}
+	if ok, _ := b.Banned("10.0.0.1"); ok {
+		t.Error("expired ban kept")
+	}
+	for _, ip := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"} {
+		if ok, _ := b.Banned(ip); !ok {
+			t.Errorf("active ban %s evicted when expired ban could be pruned", ip)
+		}
+	}
+
+	// Active-ban churn evicts soonest-to-expire entries and keeps newer ones.
+	now = time.Unix(0, 0)
+	b = NewBanner(2, time.Minute, time.Hour)
+	b.Now = func() time.Time { return now }
+	b.maxEntries = 4
+
+	for i := range 20 {
+		now = now.Add(time.Second)
+		banIP(b, fmt.Sprintf("2001:db8:%x::", i))
+		if len(b.bans) > b.maxEntries {
+			t.Fatalf("after %d bans: len(bans) = %d, want <= %d", i+1, len(b.bans), b.maxEntries)
+		}
+	}
+	if len(b.bans) != 4 {
+		t.Fatalf("len(bans) = %d, want 4", len(b.bans))
+	}
+	for i := range 16 {
+		if ok, _ := b.Banned(fmt.Sprintf("2001:db8:%x::", i)); ok {
+			t.Errorf("older ban %d was not evicted", i)
+		}
+	}
+	for i := 16; i < 20; i++ {
+		if ok, _ := b.Banned(fmt.Sprintf("2001:db8:%x::", i)); !ok {
+			t.Errorf("newer ban %d missing", i)
+		}
+	}
+
+	// Re-banning an already-banned IP at capacity doesn't evict another active ban.
+	now = now.Add(time.Second)
+	banIP(b, "2001:db8:10::")
+	if len(b.bans) != 4 {
+		t.Fatalf("re-banning existing IP changed len(bans) to %d", len(b.bans))
+	}
+	for i := 16; i < 20; i++ {
+		if ok, _ := b.Banned(fmt.Sprintf("2001:db8:%x::", i)); !ok {
+			t.Errorf("active ban %d evicted on refresh", i)
+		}
+	}
+
+	// Batch eviction when cap >= 16 keeps bans bounded and retains the newest entries.
+	now = time.Unix(0, 0)
+	b = NewBanner(1, time.Minute, time.Hour)
+	b.Now = func() time.Time { return now }
+	b.maxEntries = 16
+
+	for i := range 100 {
+		now = now.Add(time.Second)
+		banIP(b, fmt.Sprintf("2001:db8:%x::", i))
+		if len(b.bans) > b.maxEntries {
+			t.Fatalf("after %d bans: len(bans) = %d, want <= %d", i+1, len(b.bans), b.maxEntries)
+		}
+	}
+	if ok, _ := b.Banned("2001:db8:0::"); ok {
+		t.Error("oldest ban was not evicted under batch eviction")
+	}
+	for i := 86; i < 100; i++ {
+		if ok, _ := b.Banned(fmt.Sprintf("2001:db8:%x::", i)); !ok {
+			t.Errorf("recent ban %d missing after batch eviction", i)
 		}
 	}
 }

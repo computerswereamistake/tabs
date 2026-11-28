@@ -244,11 +244,13 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 	defer s.release(ip)
 
 	// Reserve this attempt before checking the code, in one transaction, so
-	// parallel guesses can't all slip in under the cap.
+	// parallel guesses can't all slip in under the cap. Don't delete the
+	// session here when the cap is reached: an in-flight final attempt may
+	// still succeed and rotate it, while a failed one deletes it below.
 	reserved := false
 	if err := s.store.UpdateSession(a.sess.ID, func(x *store.Session) bool {
-		if x.Attempts >= maxTOTPAttempts {
-			return false
+		if x.State != store.StateTOTPPending || x.Attempts >= maxTOTPAttempts {
+			return true
 		}
 		x.Attempts++
 		reserved = true
@@ -299,6 +301,9 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		s.failed(r, name, ip, a.user.ID, "totp-failed")
 		gone := false
 		_ = s.store.UpdateSession(a.sess.ID, func(x *store.Session) bool {
+			if x.State != store.StateTOTPPending {
+				return true
+			}
 			gone = x.Attempts >= maxTOTPAttempts
 			return !gone
 		})

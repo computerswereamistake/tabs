@@ -652,6 +652,29 @@ func TestTOTPLogin(t *testing.T) {
 	if rr := f.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {f.csrf()}, "code": {recovery[0]}}, nil); rr.Code != http.StatusUnauthorized {
 		t.Errorf("reused recovery code = %d", rr.Code)
 	}
+	if rr := f.request("POST", authBase+pathLoginTOTP, url.Values{"csrf": {f.csrf()}, "code": {recovery[1]}}, nil); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "8 left") {
+		t.Fatalf("second recovery code: %d\n%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestTOTPLoginMustChangePassword(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false, "users")
+	b := e.browser()
+	b.login("bob", "password-for-bob")
+	b.enrol(bob)
+	_, _ = e.st.UpdateUser(bob.ID, func(u *store.User) error { u.MustChangePassword = true; return nil })
+
+	c := e.browser()
+	c.login("bob", "password-for-bob")
+	if !strings.HasPrefix(c.lastURL, authBase+pathLoginTOTP) {
+		t.Fatalf("no TOTP step: %s", c.lastURL)
+	}
+	next := mustQuery(t, c.lastURL).Get("next")
+	c.follow("POST", authBase+pathLoginTOTP, url.Values{"csrf": {c.csrf()}, "code": {e.totpCode(bob, e.now)}, "next": {next}})
+	if !strings.HasPrefix(c.lastURL, authBase+pathAccount) || !strings.Contains(c.last.Body.String(), "Choose a new password") {
+		t.Fatalf("after TOTP with MustChangePassword: %s (%d)\n%s", c.lastURL, c.last.Code, c.last.Body.String())
+	}
 }
 
 func TestVoluntaryEnrolNeedsPassword(t *testing.T) {

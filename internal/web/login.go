@@ -268,7 +268,7 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 
 	code := strings.TrimSpace(r.PostFormValue("code"))
 	used := ""
-	_, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
+	u, err := s.store.UpdateUser(a.user.ID, func(u *store.User) error {
 		// Checked and recorded in one transaction, so two requests racing
 		// with the same code can't both pass.
 		if u.AuthEpoch != a.sess.AuthEpoch || !u.HasTOTP() || u.Locked {
@@ -323,7 +323,6 @@ func (s *Server) serveLoginTOTP(w http.ResponseWriter, r *http.Request, st *stat
 		return
 	}
 	s.audit(r, "login", "user", name, "factor", used)
-	u, _ := s.store.UserByID(a.user.ID)
 	if used == "recovery" {
 		// Say how many are left before carrying on, so running out is no
 		// surprise.

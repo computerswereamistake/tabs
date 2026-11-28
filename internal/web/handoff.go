@@ -205,6 +205,8 @@ func (s *Server) serveVerify(w http.ResponseWriter, r *http.Request, st *state) 
 	h.Set("Remote-Name", v.Name)
 	h.Set("Remote-Groups", strings.Join(v.Groups, ","))
 	if g.user.Email != "" {
+		// Omitted when unset so apps don't see an empty header; proxies
+		// calling verify must still strip client-supplied Remote-* headers.
 		h.Set("Remote-Email", g.user.Email)
 	}
 	w.WriteHeader(http.StatusOK)

@@ -408,7 +408,7 @@ node --test internal/web/testdata/app.test.mjs
 ## CI and releases
 
 [GitHub Actions](.github/workflows/ci.yml) runs on pushes to `main`, pull
-requests, `v*` tags and manual runs: gofmt, `go mod tidy`, `go vet`, golangci-lint
+requests, merge queue groups, `v*` tags and manual runs: gofmt, `go mod tidy`, `go vet`, golangci-lint
 ([config](.golangci.yml)), `go test -race` (including the JS tests),
 govulncheck and gosec, then builds the image for
 `linux/amd64` and `linux/arm64`. Only releases push the image.

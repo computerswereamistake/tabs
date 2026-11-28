@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # The merge queue needs the required "test" check on each merge group.
+  merge_group:
   # Releasing is manual: run this workflow on main from the Actions tab.
   workflow_dispatch:
 

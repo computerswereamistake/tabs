@@ -864,6 +864,40 @@ func TestResetLink(t *testing.T) {
 	}
 }
 
+func TestResetLinkExpiresBeforeRedeem(t *testing.T) {
+	e := newEnv(t)
+	bob := e.user("bob", false)
+	tok, _ := auth.NewToken()
+	_ = e.st.CreateReset(store.Reset{Hash: auth.HashToken(tok), UserID: bob.ID, ExpiresAt: e.now.Add(time.Hour)})
+	b := e.browser()
+	b.follow("GET", authBase+pathReset+"/"+tok, nil)
+	if b.lastURL != authBase+pathReset {
+		t.Fatalf("reset page at %s", b.lastURL)
+	}
+
+	origNow := e.s.opts.Now
+	calls := 0
+	e.s.opts.Now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return e.now
+		}
+		return e.now.Add(2 * time.Hour)
+	}
+	rr := b.request("POST", authBase+pathReset, url.Values{"password": {"brand new password"}, "confirm": {"brand new password"}}, nil)
+	e.s.opts.Now = origNow
+
+	if rr.Code != http.StatusGone {
+		t.Fatalf("expired before redeem: status = %d, want %d", rr.Code, http.StatusGone)
+	}
+	if rr := e.browser().login("bob", "brand new password"); rr.Code != http.StatusUnauthorized {
+		t.Errorf("login with rejected password = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+	if rr := e.browser().login("bob", "password-for-bob"); rr.Code != http.StatusOK {
+		t.Errorf("login with original password = %d, want %d", rr.Code, http.StatusOK)
+	}
+}
+
 func TestBanAndLock(t *testing.T) {
 	e := newEnv(t)
 	e.s.opts.LockAfter = 3

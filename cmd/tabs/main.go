@@ -149,6 +149,10 @@ func isLocalHost(h string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// maxDurationDays caps "Nd" durations (~100 years), safely below int64
+// time.Duration overflow (106,751 days).
+const maxDurationDays = 36500
+
 func duration(d deps, key string, def time.Duration) (time.Duration, error) {
 	v := d.getenv(key)
 	if v == "" {
@@ -159,6 +163,9 @@ func duration(d deps, key string, def time.Duration) (time.Duration, error) {
 		days, err := strconv.Atoi(n)
 		if err != nil || days <= 0 {
 			return 0, fmt.Errorf("%s: %q is not a duration", key, v)
+		}
+		if days > maxDurationDays {
+			return 0, fmt.Errorf("%s: %q exceeds maximum of %dd", key, v, maxDurationDays)
 		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}

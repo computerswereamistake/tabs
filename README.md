@@ -265,6 +265,7 @@ are **not** behind `forward_auth` (tabs authenticates them itself):
 	}
 	# The app doesn't need the gate cookie; don't hand it over.
 	request_header Cookie "(^|;\s*)(__Host-)?tabs_gate=[^;]*" ""
+	request_header Cookie "^;\s*" ""
 }
 
 auth.example.com {
@@ -307,7 +308,7 @@ other.example.com {                       # a tab with url: https://other.exampl
   `copy_headers`, and `header_up X-Forwarded-Host {hostport}` keeps the
   forwarded host to the one the browser used.
 - **Apps on the portal host trust each other.** They share one gate cookie;
-  if the `request_header` line is ever wrong, a portal app's backend could
+  if the `request_header` lines are ever wrong, a portal app's backend could
   replay a user's gate against other portal apps. Put apps you don't trust on
   their own host.
 - **Keep tokens out of Caddy's access logs.** Invite and reset links carry

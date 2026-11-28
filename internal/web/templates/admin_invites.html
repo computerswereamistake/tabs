@@ -35,7 +35,7 @@
         <form method="post" action="/_tabs/admin/invites" class="inline">
           <input type="hidden" name="csrf" value="{{$.CSRF}}">
           <input type="hidden" name="action" value="revoke">
-          <input type="hidden" name="invite" value="{{.Short}}">
+          <input type="hidden" name="invite" value="{{.Hash}}">
           <button type="submit" class="link">Revoke</button>
         </form>
       </td>

@@ -842,6 +842,54 @@ func TestInvite(t *testing.T) {
 	}
 }
 
+func TestAdminRevokeInvite(t *testing.T) {
+	e := newEnv(t)
+	e.user("ann", true)
+	a := e.browser()
+	a.login("ann", "password-for-ann")
+	a.follow("GET", authBase+pathAdmin+"/invites", nil)
+	rr := a.request("POST", authBase+pathAdmin+"/invites", url.Values{
+		"csrf": {a.csrf()}, "action": {"create"}, "groups": {"users"}, "hours": {"24"}, "uses": {"1"}, "note": {"Temporary"},
+	}, nil)
+	link := regexp.MustCompile(`https://auth\.example\.com/_tabs/invite/([A-Za-z0-9_-]+)`).FindStringSubmatch(rr.Body.String())
+	if link == nil {
+		t.Fatalf("no invite link:\n%s", rr.Body.String())
+	}
+	hash := auth.HashToken(link[1])
+	if !strings.Contains(rr.Body.String(), `name="invite" value="`+hash+`"`) {
+		t.Fatalf("revoke form missing full hash %q:\n%s", hash, rr.Body.String())
+	}
+
+	// Prefix, unknown, and empty hashes are refused without revoking anything.
+	for _, bad := range []string{hash[:8], "does-not-exist", ""} {
+		rr = a.request("POST", authBase+pathAdmin+"/invites", url.Values{
+			"csrf": {a.csrf()}, "action": {"revoke"}, "invite": {bad},
+		}, nil)
+		if rr.Code != http.StatusBadRequest || strings.Contains(rr.Body.String(), "Invite revoked.") {
+			t.Errorf("revoke(%q) = %d, body contains revoked=%v", bad, rr.Code, strings.Contains(rr.Body.String(), "Invite revoked."))
+		}
+	}
+
+	// Full hash revokes the invite so it can no longer be redeemed.
+	rr = a.request("POST", authBase+pathAdmin+"/invites", url.Values{
+		"csrf": {a.csrf()}, "action": {"revoke"}, "invite": {hash},
+	}, nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Invite revoked.") {
+		t.Fatalf("revoke full hash = %d\n%s", rr.Code, rr.Body.String())
+	}
+	if rr := e.browser().follow("GET", link[0], nil); rr.Code != http.StatusNotFound {
+		t.Errorf("revoked invite redeem = %d, want 404", rr.Code)
+	}
+
+	// Revoking the same invite again returns 400.
+	rr = a.request("POST", authBase+pathAdmin+"/invites", url.Values{
+		"csrf": {a.csrf()}, "action": {"revoke"}, "invite": {hash},
+	}, nil)
+	if rr.Code != http.StatusBadRequest || strings.Contains(rr.Body.String(), "Invite revoked.") {
+		t.Errorf("second revoke = %d, body contains revoked=%v", rr.Code, strings.Contains(rr.Body.String(), "Invite revoked."))
+	}
+}
+
 func TestResetLink(t *testing.T) {
 	e := newEnv(t)
 	bob := e.user("bob", false)

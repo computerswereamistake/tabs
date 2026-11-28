@@ -98,7 +98,7 @@ func (s *Server) failed(r *http.Request, name, ip string, userID uint64, event s
 		// otherwise lock every admin out. They still get the backoff and
 		// the address ban.
 		if _, err := s.store.UpdateUser(userID, func(u *store.User) error {
-			locked = !u.Admin
+			locked = !u.Admin && !u.Disabled && !u.Locked
 			u.Locked = u.Locked || locked
 			return nil
 		}); err != nil {
@@ -162,8 +162,10 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 		return
 	}
 	hash := u.PasswordHash
+	lockID := u.ID
 	if err != nil || u.Disabled || u.Locked {
 		hash = "" // still spend the time, then fail
+		lockID = 0
 	}
 	ok, verr := auth.VerifyPassword(hash, password)
 	if errors.Is(verr, auth.ErrBusy) {
@@ -171,7 +173,7 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request, st *state) {
 		return
 	}
 	if !ok {
-		s.failed(r, name, ip, u.ID, "login-failed")
+		s.failed(r, name, ip, lockID, "login-failed")
 		show(http.StatusUnauthorized, badLogin, name)
 		return
 	}
